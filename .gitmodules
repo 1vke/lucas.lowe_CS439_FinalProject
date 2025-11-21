@@ -1,0 +1,3 @@
+[submodule "simpleGE"]
+	path = simpleGE
+	url = https://github.com/twopiharris/simpleGE.git
