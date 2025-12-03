@@ -1,8 +1,9 @@
 """
-multiplayerSimpleGE.py (Pickle + Length-Prefix Framing)
+multiplayerSimpleGE.py (Pickle + Length-Prefix Framing + Game ID Validation)
 
 Extends simpleGE with a simple client-server multiplayer framework.
 Uses 'pickle' for serialization and 4-byte length headers for robust TCP streaming.
+Includes Game ID validation to prevent mismatching connections.
 """
 
 from simpleGE import simpleGE
@@ -56,10 +57,10 @@ def recvall(sock, n):
 class NetManager:
     """A utility class for network-related operations, like discovering games."""
     @staticmethod
-    def find_games_on_lan(broadcast_port=12346, timeout=3):
+    def find_games_on_lan(target_game_id="simpleGE_Game", broadcast_port=12346, timeout=3):
         """
         Listens for game broadcasts (UDP) on the local network.
-        Returns a list of discovered hosts.
+        Returns a list of discovered hosts matching the target_game_id.
         """
         discovered_hosts = []
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -68,7 +69,7 @@ class NetManager:
         
         try:
             sock.bind(('', broadcast_port))
-            print(f"Searching for games on the local network for {timeout} seconds...")
+            print(f"Searching for games ('{target_game_id}') on LAN for {timeout}s...")
             
             end_time = time.time() + timeout
             while time.time() < end_time:
@@ -76,11 +77,14 @@ class NetManager:
                     data, addr = sock.recvfrom(4096)
                     # UDP packets are discrete, so simple pickle.loads works
                     message = pickle.loads(data)
-                    if message.get("game_type") == "simpleGE_MP":
+                    
+                    # Filter by Game ID
+                    if message.get("game_id") == target_game_id:
                         host_info = {
                             "name": message.get("host_name", addr[0]),
                             "ip": addr[0],
-                            "tcp_port": message.get("tcp_port")
+                            "tcp_port": message.get("tcp_port"),
+                            "game_id": message.get("game_id")
                         }
                         # Avoid duplicates
                         if not any(h['ip'] == host_info['ip'] and h['tcp_port'] == host_info['tcp_port'] for h in discovered_hosts):
@@ -94,15 +98,16 @@ class NetManager:
             sock.close()
 
         if not discovered_hosts:
-            print("No games found.")
+            print("No matching games found.")
         return discovered_hosts
 
 class Server:
     """Encapsulates all server-side logic, state, and networking."""
-    def __init__(self, host, tcp_port, broadcast_port):
+    def __init__(self, host, tcp_port, broadcast_port, game_id="simpleGE_Game"):
         self.host = host
         self.tcp_port = tcp_port
         self.broadcast_port = broadcast_port
+        self.game_id = game_id
         self.game_state = {"clients": {}}
         self.clients = []
         self.lock = threading.Lock()
@@ -116,7 +121,7 @@ class Server:
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((self.host, self.tcp_port))
         server_socket.listen()
-        print(f"Game server listening for TCP connections on {self.host}:{self.tcp_port}")
+        print(f"Game server ('{self.game_id}') listening on {self.host}:{self.tcp_port}")
         while True:
             client_sock, _ = server_socket.accept()
             handler = threading.Thread(target=self._handle_client_connection, args=(client_sock,))
@@ -130,7 +135,7 @@ class Server:
         print(f"Broadcasting presence on UDP port {self.broadcast_port}")
         while True:
             message = {
-                "game_type": "simpleGE_MP",
+                "game_id": self.game_id,
                 "host_name": socket.gethostname(),
                 "tcp_port": self.tcp_port
             }
@@ -141,6 +146,19 @@ class Server:
             time.sleep(2)
 
     def _handle_client_connection(self, client_sock):
+        # 1. Receive Client Handshake (Game ID check)
+        try:
+            handshake = recv_msg(client_sock)
+            if not handshake or handshake.get("game_id") != self.game_id:
+                print(f"Connection rejected: Game ID mismatch. Expected {self.game_id}, got {handshake.get('game_id')}")
+                client_sock.close()
+                return
+        except Exception as e:
+            print(f"Handshake error: {e}")
+            client_sock.close()
+            return
+
+        # 2. Assign ID and Accept
         client_id = str(uuid.uuid4())
         with self.lock:
             self.clients.append(client_sock)
@@ -207,11 +225,12 @@ class NetSprite(simpleGE.Sprite):
         self.imageAngle = state.get("image_angle", self.imageAngle)
 
 class NetworkScene(simpleGE.Scene):
-    def __init__(self, host, port, sprite_class=NetSprite):
+    def __init__(self, host, port, sprite_class=NetSprite, game_id="simpleGE_Game"):
         super().__init__()
         self.host = host
         self.port = port
         self.sprite_class = sprite_class
+        self.game_id = game_id
         self.client = None
         self.remote_sprites = {}
         self.remote_player_group = self.makeSpriteGroup([])
@@ -259,15 +278,15 @@ class NetworkScene(simpleGE.Scene):
         super().stop()
 
 class HostScene(NetworkScene):
-    def __init__(self, host='0.0.0.0', tcp_port=12345, broadcast_port=12346, sprite_class=NetSprite):
-        self.server = Server(host, tcp_port, broadcast_port)
+    def __init__(self, host='0.0.0.0', tcp_port=12345, broadcast_port=12346, sprite_class=NetSprite, game_id="simpleGE_Game"):
+        self.server = Server(host, tcp_port, broadcast_port, game_id)
         self.server.start()
         # Connect as a client to our own server
-        super().__init__('127.0.0.1', tcp_port, sprite_class)
-        self.setCaption("My Game (HOST)")
-        self.client = Client('127.0.0.1', tcp_port)
+        super().__init__('127.0.0.1', tcp_port, sprite_class, game_id)
+        self.setCaption(f"{game_id} (HOST)")
+        self.client = Client('127.0.0.1', tcp_port, game_id)
         
-        # Wait briefly for ID assignment (optional, but helps avoid initial blips)
+        # Wait briefly for ID assignment
         start = time.time()
         while not self.client.id and time.time() - start < 1.0:
             time.sleep(0.05)
@@ -276,10 +295,10 @@ class HostScene(NetworkScene):
              self.local_player.net_id = self.client.id
 
 class ClientScene(NetworkScene):
-    def __init__(self, host, port=12345, sprite_class=NetSprite):
-        super().__init__(host, port, sprite_class)
-        self.setCaption(f"My Game (Client at {host})")
-        self.client = Client(self.host, port)
+    def __init__(self, host, port=12345, sprite_class=NetSprite, game_id="simpleGE_Game"):
+        super().__init__(host, port, sprite_class, game_id)
+        self.setCaption(f"{game_id} (Client at {host})")
+        self.client = Client(self.host, port, game_id)
         
         # Wait briefly for ID assignment
         start = time.time()
@@ -290,13 +309,18 @@ class ClientScene(NetworkScene):
             self.local_player.net_id = self.client.id
 
 class Client:
-    def __init__(self, host, port):
+    def __init__(self, host, port, game_id="simpleGE_Game"):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.id = None
+        self.game_id = game_id
         self.latest_state = {}
         self.lock = threading.Lock()
         try:
             self.socket.connect((host, port))
+            
+            # Send handshake
+            send_msg(self.socket, {"game_id": self.game_id})
+            
             threading.Thread(target=self._receive_data, daemon=True).start()
         except ConnectionRefusedError:
             print(f"Connection refused at {host}:{port}. Is a host running?")

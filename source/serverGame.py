@@ -1,16 +1,11 @@
-import pygame, random, multiplayerSimpleGE
-
-def generate_random_rgb_color():
-    """Generates a random RGB color as a tuple (R, G, B)."""
-    r = random.randint(0, 255)
-    g = random.randint(0, 255)
-    b = random.randint(0, 255)
-    return (r, g, b)
+import pygame, multiplayerSimpleGE
 
 class RedBall(multiplayerSimpleGE.NetSprite):
     def __init__(self, scene, is_local=False):
         super().__init__(scene, is_local)
-        self.colorRect(generate_random_rgb_color(), (30, 30))
+        self.image = pygame.Surface((30, 30), pygame.SRCALPHA)
+        pygame.draw.circle(self.image, (255, 0, 0), (15, 15), 15)
+        self.imageMaster = self.image
         self.rect = self.image.get_rect()
         self.moveSpeed = 5
 
@@ -26,9 +21,10 @@ class RedBall(multiplayerSimpleGE.NetSprite):
                 self.y += self.moveSpeed
 
 def main():
-    # Create the Host Scene
-    # We use the RedBall sprite for players
-    game = multiplayerSimpleGE.HostScene(sprite_class=RedBall)
+    # Create the Host Scene with a specific Game ID
+    game_id = "RedBallGame"
+    game = multiplayerSimpleGE.HostScene(sprite_class=RedBall, game_id=game_id)
+    print(f"Hosting '{game_id}'...")
     game.start()
 
 if __name__ == "__main__":
