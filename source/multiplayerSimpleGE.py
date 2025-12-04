@@ -6,24 +6,10 @@ Extends simpleGE with a client-server multiplayer framework.
 - UDP: Used for fast, real-time movement updates using 'struct' for binary packing.
 """
 
-try:
-    from simpleGE import simpleGE
-except ImportError:
-    import simpleGE
+from simpleGE import simpleGE
+import socket, threading, pickle, struct, uuid, time
 
-import socket
-import threading
-import pickle
-import struct
-import uuid
-import time
-
-# --- Binary Packing Config ---
-# Format: UUID (36 bytes) + X (float) + Y (float) + Angle (float)
-# 36s = 36 char string, f = float (4 bytes)
-# Total size = 36 + 4 + 4 + 4 = 48 bytes per update
-PACKET_FMT = '36sfff'
-PACKET_SIZE = struct.calcsize(PACKET_FMT)
+VERBOSE = False
 
 # --- Network Helper Functions ---
 
@@ -40,12 +26,17 @@ def recv_tcp_msg(sock):
     """Receives a length header and then the pickled payload over TCP."""
     try:
         raw_msglen = recvall(sock, 4)
-        if not raw_msglen: return None
+        if not raw_msglen: 
+            if VERBOSE: print("recv_tcp_msg: Failed to read length header")
+            return None
         msglen = struct.unpack('>I', raw_msglen)[0]
         data = recvall(sock, msglen)
-        if not data: return None
+        if not data: 
+            if VERBOSE: print("recv_tcp_msg: Failed to read data payload")
+            return None
         return pickle.loads(data)
-    except (ConnectionError, OSError, pickle.UnpicklingError):
+    except (ConnectionError, OSError, pickle.UnpicklingError) as e:
+        if VERBOSE: print(f"recv_tcp_msg error: {e}")
         return None
 
 def recvall(sock, n):
@@ -98,7 +89,7 @@ class Server:
         self.broadcast_port = broadcast_port
         self.game_id = game_id
         
-        self.game_state = {"clients": {}}
+        self.game_state = {} # Generic game state: client_id -> data payload
         self.client_map = {} # Maps client_id -> (IP, UDP_Port)
         self.clients_tcp = []
         
@@ -130,49 +121,45 @@ class Server:
             except OSError: break
 
     def _run_udp_listener(self):
-        """Receives binary packed movement updates from clients."""
+        """Receives pickled updates from clients."""
         while self.running:
             try:
-                data, addr = self.udp_sock.recvfrom(1024)
-                if len(data) == PACKET_SIZE:
-                    # Unpack: UUID (36s), x (f), y (f), angle (f)
-                    uid_bytes, x, y, angle = struct.unpack(PACKET_FMT, data)
-                    client_id = uid_bytes.decode().strip('\x00')
+                data, addr = self.udp_sock.recvfrom(4096)
+                try:
+                    client_id, payload = pickle.loads(data)
+                    if VERBOSE: print(f"Server UDP: Received from {client_id} at {addr}: {payload}")
                     
                     with self.lock:
-                        # Store UDP address for broadcasting back
                         if client_id not in self.client_map:
                             self.client_map[client_id] = addr
+                            if VERBOSE: print(f"Server UDP: Added {client_id} to client_map: {addr}")
                             
-                        # Update State
-                        self.game_state["clients"][client_id] = {
-                            "x": x, "y": y, "image_angle": angle
-                        }
+                        self.game_state[client_id] = payload
+                        if VERBOSE: print(f"Server UDP: Updated game_state for {client_id}. Current state keys: {list(self.game_state.keys())}")
                         
-                    # Immediately broadcast update to others (via UDP)
                     self._broadcast_udp_state()
-            except OSError: break
+                except (pickle.UnpicklingError, ValueError) as e:
+                    if VERBOSE: print(f"Server UDP: Error unpickling/unpacking data from {addr}: {e}, Data: {data}")
+                    continue
+            except OSError as e:
+                if VERBOSE: print(f"Server UDP: OSError in listener: {e}")
+                break
 
     def _broadcast_udp_state(self):
         """Packs entire game state and blasts it to all known UDP clients."""
-        # Note: For many clients, this loop should be smarter (don't send everything to everyone)
-        # For simplicity, we pickle the WHOLE state for downstream updates 
-        # (Client -> Server is Struct, Server -> Client is Pickle for simplicity/flexibility 
-        # unless we want to implement a complex binary protocol for the full state list).
-        # To keep it strictly struct, we'd need to loop and pack every player.
-        
-        # Optimization: Let's stick to Pickle for Server->Client Broadcast for now 
-        # because the client list is dynamic length.
-        
         try:
             with self.lock:
-                if not self.client_map: return
-                # We use pickle here because the list of players varies size
+                if not self.client_map: 
+                    # print("Server UDP: No clients to broadcast to.") # Not printing every time for brevity
+                    return
                 payload = pickle.dumps(self.game_state)
+                if VERBOSE: print(f"Server UDP: Broadcasting state (size {len(payload)} bytes) to {len(self.client_map)} clients. State keys: {list(self.game_state.keys())}")
                 
                 for cid, addr in self.client_map.items():
+                    # print(f"Server UDP: Sending to {cid} at {addr}") # Not printing every time for brevity
                     self.udp_sock.sendto(payload, addr)
-        except Exception: pass
+        except Exception as e:
+            if VERBOSE: print(f"Server UDP: Error broadcasting state: {e}")
 
     def _handle_client_tcp(self, client_sock):
         """Handles handshake: Checks ID, exchanges UDP ports."""
@@ -206,7 +193,11 @@ class Server:
         finally:
             with self.lock:
                 if client_sock in self.clients_tcp: self.clients_tcp.remove(client_sock)
-                if client_id in self.game_state["clients"]: del self.game_state["clients"][client_id]
+                
+                # Remove client state
+                if client_id in self.game_state:
+                    del self.game_state[client_id]
+
                 if client_id in self.client_map: del self.client_map[client_id]
             client_sock.close()
             print(f"Client {client_id} disconnected.")
@@ -221,83 +212,72 @@ class Server:
             except: pass
             time.sleep(2)
 
+# Kept as a utility, but not used by NetworkScene directly anymore
 class NetSprite(simpleGE.Sprite):
     def __init__(self, scene, is_local=False):
         super().__init__(scene)
-        self.net_id = None
+        self.net_id = None # Owner's client ID
+        self.sprite_id = str(uuid.uuid4()) # Unique ID for this sprite
         self.is_local = is_local
         if not self.is_local: self.hide()
 
     def get_net_state(self):
-        return {"x": self.x, "y": self.y, "image_angle": self.imageAngle}
+        # Return owner_id, sprite_id, x, y, angle
+        return (self.net_id, self.sprite_id, self.x, self.y, self.imageAngle)
 
     def set_net_state(self, state):
         if not self.visible: self.show()
-        self.x = state.get("x", self.x)
-        self.y = state.get("y", self.y)
-        self.imageAngle = state.get("image_angle", self.imageAngle)
+        # Expecting tuple (x, y, angle)
+        if isinstance(state, (tuple, list)) and len(state) >= 3:
+            self.x, self.y, self.imageAngle = state
 
 class NetworkScene(simpleGE.Scene):
-    def __init__(self, host, port, sprite_class=NetSprite, game_id="simpleGE_Game"):
+    def __init__(self, host, port, game_id="simpleGE_Game"):
         super().__init__()
         self.host = host
         self.port = port
-        self.sprite_class = sprite_class
         self.game_id = game_id
         self.client = None
-        self.remote_sprites = {}
-        self.remote_player_group = self.makeSpriteGroup([])
-        self.addGroup(self.remote_player_group)
-        self.local_player = self.sprite_class(self, is_local=True)
-        self.sprites = [self.local_player]
+        self.local_client_id = None # Will be set by the Client after ID assignment
     
     def process(self):
         self._update_from_network()
         self._send_local_state()
 
     def _update_from_network(self):
+        """Override this to handle state updates from server."""
         if not self.client: return
         state = self.client.get_latest_state()
-        if not state: return
+        if not state: 
+            # if VERBOSE: print("NetworkScene: No state from client.")
+            return
+        if VERBOSE: print(f"NetworkScene: Passing state to handler. Keys: {list(state.keys())}")
+        self.handle_network_state(state)
 
-        client_data = state.get("clients", {})
-        current_ids = set(client_data.keys())
-        known_ids = set(self.remote_sprites.keys())
-
-        # New Players
-        for cid in current_ids - known_ids:
-            if cid != self.local_player.net_id:
-                new_sprite = self.sprite_class(self, is_local=False)
-                self.remote_sprites[cid] = new_sprite
-                self.remote_player_group.add(new_sprite)
-        
-        # Update Players
-        for cid, sprite in self.remote_sprites.items():
-            if cid in client_data:
-                sprite.set_net_state(client_data[cid])
-        
-        # Remove Players
-        for cid in known_ids - current_ids:
-            self.remote_sprites[cid].kill()
-            del self.remote_sprites[cid]
+    def handle_network_state(self, state):
+        """Override to process the entire game state dict."""
+        pass
 
     def _send_local_state(self):
-        if self.client and self.local_player.net_id:
-            self.client.send_movement(
-                self.local_player.x, 
-                self.local_player.y, 
-                self.local_player.imageAngle
-            )
+        """Override to send local state."""
+        if self.client and self.client.id:
+            data = self.get_local_state()
+            if data is not None:
+                self.client.send_update(data)
+
+    def get_local_state(self):
+        """Override to return data to send to server."""
+        return None
 
     def stop(self):
         if self.client: self.client.stop()
         super().stop()
 
 class HostScene(NetworkScene):
-    def __init__(self, host='0.0.0.0', tcp_port=12345, broadcast_port=12346, sprite_class=NetSprite, game_id="simpleGE_Game"):
+    def __init__(self, host='0.0.0.0', tcp_port=12345, broadcast_port=12346, game_id="simpleGE_Game"):
         self.server = Server(host, tcp_port, broadcast_port, game_id)
         self.server.start()
-        super().__init__('127.0.0.1', tcp_port, sprite_class, game_id)
+        super().__init__('127.0.0.1', tcp_port, game_id)
         self.setCaption(f"{game_id} (HOST)")
         self.client = Client('127.0.0.1', tcp_port, game_id)
         self._wait_for_id()
@@ -306,11 +286,12 @@ class HostScene(NetworkScene):
         start = time.time()
         while not self.client.id and time.time() - start < 2.0:
             time.sleep(0.05)
-        if self.client.id: self.local_player.net_id = self.client.id
+        if self.client.id:
+            self.local_client_id = self.client.id
 
 class ClientScene(NetworkScene):
-    def __init__(self, host, port=12345, sprite_class=NetSprite, game_id="simpleGE_Game"):
-        super().__init__(host, port, sprite_class, game_id)
+    def __init__(self, host, port=12345, game_id="simpleGE_Game"):
+        super().__init__(host, port, game_id)
         self.setCaption(f"{game_id} (Client at {host})")
         self.client = Client(self.host, port, game_id)
         self._wait_for_id()
@@ -319,7 +300,8 @@ class ClientScene(NetworkScene):
         start = time.time()
         while not self.client.id and time.time() - start < 2.0:
             time.sleep(0.05)
-        if self.client.id: self.local_player.net_id = self.client.id
+        if self.client.id:
+            self.local_client_id = self.client.id
 
 class Client:
     def __init__(self, host, port, game_id="simpleGE_Game"):
@@ -333,16 +315,21 @@ class Client:
         self.running = True
 
         try:
+            if VERBOSE: print(f"Client connecting to {host}:{port}...")
             # TCP Handshake
             self.tcp_sock.connect((host, port))
+            if VERBOSE: print("Client connected. Sending handshake...")
             send_tcp_msg(self.tcp_sock, {"game_id": game_id})
             
             # Wait for assignment
+            if VERBOSE: print("Client waiting for ID assignment...")
             response = recv_tcp_msg(self.tcp_sock)
             if response and response.get("type") == "id_assignment":
                 self.id = response["id"]
                 self.server_udp_port = response["udp_port"]
                 print(f"Assigned ID: {self.id}. Server UDP at port {self.server_udp_port}")
+            else:
+                print(f"Client received unexpected response: {response}")
             
             # Start Listeners
             threading.Thread(target=self._listen_udp, daemon=True).start()
@@ -355,25 +342,29 @@ class Client:
         """Receives game state updates via UDP."""
         # Send a dummy packet first so server knows our UDP address
         if self.id and self.server_udp_port:
-            self.send_movement(0,0,0)
+            if VERBOSE: print(f"Client UDP ({self.id}): Sending initial registration packet.")
+            self.send_update("init")
 
         while self.running:
             try:
                 data, _ = self.udp_sock.recvfrom(4096)
                 state = pickle.loads(data)
+                if VERBOSE: print(f"Client UDP ({self.id}): Received state. Keys: {list(state.keys())}")
                 with self.lock: self.latest_state = state
-            except: break
+            except Exception as e:
+                if VERBOSE: print(f"Client UDP ({self.id}): Error receiving state: {e}")
+                break
 
-    def send_movement(self, x, y, angle):
-        """Packs data into binary struct and sends via UDP."""
+    def send_update(self, data):
+        """Packs data using pickle and sends via UDP."""
         if not (self.running and self.id and self.server_udp_port): return
         try:
-            # Pack: UUID (36s), x (f), y (f), angle (f)
-            # Encode ID to bytes, ensure it fits 36 bytes
-            id_bytes = self.id.encode('utf-8')
-            packet = struct.pack(PACKET_FMT, id_bytes, x, y, angle)
+            # Send tuple: (client_id, payload)
+            packet = pickle.dumps((self.id, data))
+            if VERBOSE: print(f"Client UDP ({self.id}): Sending update (size {len(packet)} bytes). Payload: {data}")
             self.udp_sock.sendto(packet, (self.host, self.server_udp_port))
-        except Exception: pass
+        except Exception as e:
+            if VERBOSE: print(f"Client UDP ({self.id}): Error sending update: {e}")
 
     def get_latest_state(self):
         with self.lock: return self.latest_state.copy()

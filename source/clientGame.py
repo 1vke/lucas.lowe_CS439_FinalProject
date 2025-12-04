@@ -1,38 +1,27 @@
-import pygame, multiplayerSimpleGE
-
-class RedBall(multiplayerSimpleGE.NetSprite):
-    def __init__(self, scene, is_local=False):
-        super().__init__(scene, is_local)
-        self.image = pygame.Surface((30, 30), pygame.SRCALPHA)
-        pygame.draw.circle(self.image, (255, 0, 0), (15, 15), 15)
-        self.imageMaster = self.image
-        self.rect = self.image.get_rect()
-        self.moveSpeed = 5
-
-    def process(self):
-        if self.is_local:
-            if self.isKeyPressed(pygame.K_LEFT):
-                self.x -= self.moveSpeed
-            if self.isKeyPressed(pygame.K_RIGHT):
-                self.x += self.moveSpeed
-            if self.isKeyPressed(pygame.K_UP):
-                self.y -= self.moveSpeed
-            if self.isKeyPressed(pygame.K_DOWN):
-                self.y += self.moveSpeed
+import multiplayerSimpleGE
+from game import RedBall, GAME_ID, ClientGameScene
 
 def main():
-    game_id = "RedBallGame"
-    print(f"Looking for games with ID: '{game_id}'...")
-    hosts = multiplayerSimpleGE.NetManager.find_games_on_lan(target_game_id=game_id)
+    print(f"Looking for games with ID: '{GAME_ID}'...")
+    hosts = multiplayerSimpleGE.NetManager.find_games_on_lan(target_game_id=GAME_ID)
     
     if hosts:
         host_info = hosts[0]
         print(f"Found game hosted by {host_info['name']} at {host_info['ip']}:{host_info['tcp_port']}")
         
-        game = multiplayerSimpleGE.ClientScene(host=host_info['ip'], port=host_info['tcp_port'], sprite_class=RedBall, game_id=game_id)
+        game = ClientGameScene(host=host_info['ip'], port=host_info['tcp_port'], sprite_class=RedBall, game_id=GAME_ID)
         game.start()
     else:
-        print(f"No games with ID '{game_id}' found on LAN. Make sure the correct server is running.")
+        print(f"No games with ID '{GAME_ID}' found on LAN. Make sure the correct server is running.")
+        
+        # Fallback to manual entry
+        manual_ip = input("Enter Server IP manually (or press Enter to quit): ")
+        if manual_ip:
+            try:
+                game = ClientGameScene(host=manual_ip, port=12345, sprite_class=RedBall, game_id=GAME_ID)
+                game.start()
+            except Exception as e:
+                print(f"Could not connect to {manual_ip}: {e}")
 
 if __name__ == "__main__":
     main()
