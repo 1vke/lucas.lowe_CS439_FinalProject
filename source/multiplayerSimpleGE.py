@@ -10,7 +10,19 @@ from simpleGE import simpleGE
 import socket, threading, pickle, struct, uuid, time
 
 VERBOSE = False
-DISCONNECT_TIMEOUT = 5.0 # Seconds before client declares connection lost
+
+# --- Global Constants ---
+DEFAULT_GAME_ID = "simpleGE_Game"
+DEFAULT_TCP_PORT = 12345
+BROADCAST_PORT = 12346
+DISCONNECT_TIMEOUT = 5.0
+CONNECTION_TIMEOUT = 7.0
+DISCOVERY_TIMEOUT = 3
+ID_WAIT_TIMEOUT = 2.0
+ID_WAIT_INTERVAL = 0.05
+UDP_SOCKET_TIMEOUT = 1.0
+BROADCAST_INTERVAL = 2
+UDP_BUFFER_SIZE = 4096
 
 class NetUtils:
     @staticmethod
@@ -57,9 +69,11 @@ class NetUtils:
             data += packet
         return data
 
+# --- Classes ---
+
 class NetManager:
     @staticmethod
-    def find_games_on_lan(target_game_id="simpleGE_Game", broadcast_port=12346, timeout=3):
+    def find_games_on_lan(target_game_id=DEFAULT_GAME_ID, broadcast_port=BROADCAST_PORT, timeout=DISCOVERY_TIMEOUT):
         discovered_hosts = []
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -70,7 +84,7 @@ class NetManager:
             end_time = time.time() + timeout
             while time.time() < end_time:
                 try:
-                    data, addr = sock.recvfrom(4096)
+                    data, addr = sock.recvfrom(UDP_BUFFER_SIZE)
                     message = pickle.loads(data)
                     if message.get("game_id") == target_game_id:
                         host_info = {
@@ -90,7 +104,7 @@ class NetManager:
         return discovered_hosts
 
 class Server:
-    def __init__(self, host, tcp_port, broadcast_port, game_id="simpleGE_Game"):
+    def __init__(self, host, tcp_port, broadcast_port, game_id=DEFAULT_GAME_ID):
         self.host = host
         self.tcp_port = tcp_port
         self.broadcast_port = broadcast_port
@@ -135,7 +149,7 @@ class Server:
         """Receives pickled updates from clients."""
         while self.running:
             try:
-                data, addr = self.udp_sock.recvfrom(4096)
+                data, addr = self.udp_sock.recvfrom(UDP_BUFFER_SIZE)
                 try:
                     client_id, payload = pickle.loads(data)
                     if VERBOSE: self.log(f"UDP: Received from {client_id} at {addr}: {payload}")
@@ -221,8 +235,9 @@ class Server:
             msg = {"game_id": self.game_id, "host_name": socket.gethostname(), "tcp_port": self.tcp_port}
             try: sock.sendto(pickle.dumps(msg), ('<broadcast>', self.broadcast_port))
             except: pass
-            time.sleep(2)
+            time.sleep(BROADCAST_INTERVAL)
 
+# Kept as a utility, but not used by NetworkScene directly anymore
 class NetSprite(simpleGE.Sprite):
     def __init__(self, scene, is_local=False):
         super().__init__(scene)
@@ -242,7 +257,7 @@ class NetSprite(simpleGE.Sprite):
             self.x, self.y, self.imageAngle = state
 
 class NetworkScene(simpleGE.Scene):
-    def __init__(self, host, port, game_id="simpleGE_Game"):
+    def __init__(self, host, port, game_id=DEFAULT_GAME_ID):
         super().__init__()
         self.host = host
         self.port = port
@@ -293,7 +308,7 @@ class NetworkScene(simpleGE.Scene):
         super().stop()
 
 class HostScene(NetworkScene):
-    def __init__(self, host='0.0.0.0', tcp_port=12345, broadcast_port=12346, game_id="simpleGE_Game"):
+    def __init__(self, host='0.0.0.0', tcp_port=DEFAULT_TCP_PORT, broadcast_port=BROADCAST_PORT, game_id=DEFAULT_GAME_ID):
         self.server = Server(host, tcp_port, broadcast_port, game_id)
         self.server.start()
         super().__init__('127.0.0.1', tcp_port, game_id)
@@ -309,13 +324,13 @@ class HostScene(NetworkScene):
 
     def _wait_for_id(self):
         start = time.time()
-        while not self.client.id and time.time() - start < 2.0 and self.client.connected:
-            time.sleep(0.05)
+        while not self.client.id and time.time() - start < ID_WAIT_TIMEOUT and self.client.connected:
+            time.sleep(ID_WAIT_INTERVAL)
         if self.client.id:
             self.local_client_id = self.client.id
 
 class ClientScene(NetworkScene):
-    def __init__(self, host, port=12345, game_id="simpleGE_Game"):
+    def __init__(self, host, port=DEFAULT_TCP_PORT, game_id=DEFAULT_GAME_ID):
         super().__init__(host, port, game_id)
         self.setCaption(f"{game_id} (Client at {host})")
         
@@ -329,17 +344,17 @@ class ClientScene(NetworkScene):
 
     def _wait_for_id(self):
         start = time.time()
-        while not self.client.id and time.time() - start < 2.0 and self.client.connected:
-            time.sleep(0.05)
+        while not self.client.id and time.time() - start < ID_WAIT_TIMEOUT and self.client.connected:
+            time.sleep(ID_WAIT_INTERVAL)
         if self.client.id:
             self.local_client_id = self.client.id
 
 class Client:
-    def __init__(self, host, port, game_id="simpleGE_Game"):
+    def __init__(self, host, port, game_id=DEFAULT_GAME_ID):
         self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # Set a timeout for UDP socket to detect disconnects more actively
-        self.udp_sock.settimeout(1.0) 
+        self.udp_sock.settimeout(UDP_SOCKET_TIMEOUT) 
         self.host = host
         self.id = None
         self.server_udp_port = None
@@ -350,7 +365,7 @@ class Client:
         self.last_packet_time = time.time()
 
         try:
-            self.tcp_sock.settimeout(7.0) # 7 second timeout for connection
+            self.tcp_sock.settimeout(CONNECTION_TIMEOUT) # 7 second timeout for connection
             if VERBOSE: self.log(f"Connecting to {host}:{port}...")
             # TCP Handshake
             self.tcp_sock.connect((host, port))
@@ -396,7 +411,7 @@ class Client:
 
         while self.running and self.connected: # Loop while connected
             try:
-                data, _ = self.udp_sock.recvfrom(4096)
+                data, _ = self.udp_sock.recvfrom(UDP_BUFFER_SIZE)
                 self.last_packet_time = time.time() # Update heartbeat
                 
                 state = pickle.loads(data)
