@@ -23,6 +23,7 @@ Key Features:
 """
 
 from simpleGE import simpleGE
+from bless import BlessServer
 from bleak import BleakScanner, BleakError
 from bleak.exc import BleakBluetoothNotAvailableError
 import asyncio, socket, threading, pickle, struct, uuid, time
@@ -107,6 +108,20 @@ class NetUtils:
             if not packet: return None
             data += packet
         return data
+    
+    @staticmethod
+    def get_local_ip():
+        """Returns the local IP address of this machine."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Doesn't actually connect, just determines route
+            s.connect(('10.255.255.255', 1))
+            IP = s.getsockname()[0]
+        except Exception:
+            IP = '127.0.0.1'
+        finally:
+            s.close()
+        return IP
 
 # --- Discovery Services ---
 
@@ -206,54 +221,103 @@ class LANDiscoveryService(DiscoveryService):
 class BLEDiscoveryService(DiscoveryService):
     """
     Implements game discovery via Bluetooth Low Energy (BLE).
-    Note: Bleak is primarily a Client (Central) library. Advertising (Peripheral role) 
-    is not natively supported on all platforms by Bleak.
+    Uses 'bless' for Advertising (Peripheral) and 'bleak' for Scanning (Central).
     """
+    # Generate a unique UUID for your game so you don't connect to lightbulbs
+    GAME_SERVICE_UUID = "A07498CA-AD5B-474E-940D-16F1FBE7E8CD"
+    
     def __init__(self):
-        pass
+        self.advertising = False
+        self.server = None
+        
+        # Create a dedicated event loop for Async BLE tasks so they don't block the game
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._run_async_loop, daemon=True)
+        self.thread.start()
+
+    def _run_async_loop(self):
+        """Runs the asyncio loop in a background thread."""
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
 
     def start_advertising(self, game_id, port):
-        """
-        BLE Advertising is not supported by Bleak.
-        To advertise, you would need a platform-specific tool or a library that supports Peripheral role.
-        """
-        NetUtils.debug_log("BLE Advertising not supported by Bleak (Central-only).", "BLE")
+        """Schedules the async advertising task."""
+        self.advertising = True
+        asyncio.run_coroutine_threadsafe(self._advertise_task(game_id), self.loop)
+
+    async def _advertise_task(self, game_id):
+        try:
+            # 1. Get Local IP and pack into bytes
+            ip = NetUtils.get_local_ip()
+            ip_bytes = socket.inet_aton(ip) # e.g. 192.168.1.5 -> b'\xc0\xa8\x01\x05'
+            
+            # 2. Configure Server
+            # Note: We append the Game ID to the BLE Name (limited chars usually)
+            service_name = f"G:{game_id}"[:20] 
+            self.server = BlessServer(name=service_name)
+            self.server.add_new_service(self.GAME_SERVICE_UUID)
+            
+            # 3. Start Advertising with IP in Manufacturer Data (Key 0xFFFF is for testing)
+            NetUtils.debug_log(f"Starting BLE Ad. Name: {service_name}, IP: {ip}", "BLE")
+            await self.server.start_advertising(
+                services=[self.GAME_SERVICE_UUID],
+                manufacturer_data={0xFFFF: ip_bytes}
+            )
+        except Exception as e:
+            NetUtils.debug_log(f"Failed to start BLE advertising: {e}", "BLE")
 
     def stop_advertising(self):
-        pass
+        if self.advertising and self.server:
+            self.advertising = False
+            asyncio.run_coroutine_threadsafe(self.server.stop_advertising(), self.loop)
 
     def find_games(self, game_id, timeout):
-        """Scans for BLE devices using BleakScanner."""
-        print(f"Scanning for BLE devices (heuristic: name contains '{game_id}')...")
+        """
+        Scans for BLE devices, extracts IP from manufacturer data, 
+        and returns list of host dicts.
+        """
+        print(f"Scanning for BLE games (UUID: {self.GAME_SERVICE_UUID})...")
+        future = asyncio.run_coroutine_threadsafe(self._scan_task(game_id, timeout), self.loop)
         try:
-            return asyncio.run(self._scan(game_id, timeout))
-        except BleakBluetoothNotAvailableError as e:
-            NetUtils.debug_log(f"Bluetooth not available: {e} (Reason: {e.reason})", "BLE")
-            return []
-        except BleakError as e:
-            NetUtils.debug_log(f"Bleak error during scan: {e}", "BLE")
-            return []
+            return future.result() # Wait for the thread to finish scanning
         except Exception as e:
-            NetUtils.debug_log(f"Unexpected error during BLE scan: {e}", "BLE")
+            NetUtils.debug_log(f"Error getting scan results: {e}", "BLE")
             return []
 
-    async def _scan(self, game_id, timeout):
+    async def _scan_task(self, game_id, timeout):
         discovered_hosts = []
         try:
-            devices = await BleakScanner.discover(timeout=timeout)
+            # Scan specifically for devices advertising our Service UUID
+            devices = await BleakScanner.discover(timeout=timeout, service_uuids=[self.GAME_SERVICE_UUID])
+            
             for d in devices:
-                # Heuristic: Check if device name matches game_id
-                if d.name and game_id in d.name:
-                    NetUtils.debug_log(f"Found matching BLE device: {d.name} ({d.address})", "BLE")
-                    # Placeholder: We can't extract IP/Port easily without a custom protocol
-                    # host_info = { "name": d.name, "ip": "???", "tcp_port": ???, "game_id": game_id }
-                    # discovered_hosts.append(host_info)
+                # 1. Check if it has the magic Manufacturer Data
+                if d.metadata['manufacturer_data'] and 0xFFFF in d.metadata['manufacturer_data']:
+                    ip_bytes = d.metadata['manufacturer_data'][0xFFFF]
+                    
+                    try:
+                        # 2. Decode IP
+                        ip_str = socket.inet_ntoa(ip_bytes)
+                        
+                        # 3. Add to results
+                        host_info = {
+                            "name": d.name,
+                            "ip": ip_str, 
+                            "tcp_port": DEFAULT_TCP_PORT, # BLE can't easily send port, assumes default
+                            "game_id": game_id 
+                        }
+                        
+                        # Filter duplicates
+                        if not any(h['ip'] == host_info['ip'] for h in discovered_hosts):
+                            discovered_hosts.append(host_info)
+                            NetUtils.debug_log(f"Found via BLE: {d.name} @ {ip_str}", "BLE")
+                            
+                    except Exception:
+                        continue
+                        
         except Exception as e:
-            # Re-raise to be handled by find_games or let it bubble up if it's a critical BleakError
-            raise e
-        
-        if not discovered_hosts:
-            print("No matching BLE games found.")
+            NetUtils.debug_log(f"Scan Error: {e}", "BLE")
+            
         return discovered_hosts
 
 # --- Managers & Core Classes ---
