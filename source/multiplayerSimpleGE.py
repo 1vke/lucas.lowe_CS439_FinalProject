@@ -1,9 +1,22 @@
 """
-multiplayerSimpleGE.py (Hybrid TCP/UDP + Struct Packing)
+multiplayerSimpleGE.py
 
 Extends simpleGE with a client-server multiplayer framework.
-- TCP: Used for connection setup, ID assignment, and exchanging UDP ports.
-- UDP: Used for fast, real-time movement updates using 'struct' for binary packing.
+
+Key Features:
+- Hybrid TCP/UDP Architecture:
+    - TCP: Used for reliable connection setup, ID assignment, and handshake via `NetUtils`.
+    - UDP: Used for fast, real-time game state updates.
+- Object Serialization: 
+	- Uses `pickle` for both TCP messages and UDP game state payloads, allowing generic Python
+    objects (tuples, dicts, etc.) to be transmitted.
+- Connection Management: 
+    - Includes heartbeat logic to detect server disconnects (`DISCONNECT_TIMEOUT`).
+    - Handles connection timeouts for clients connecting to invalid IPs (`CONNECTION_TIMEOUT`).
+- Abstract NetworkScene: 
+    - Provides a base `NetworkScene` that handles the networking loop.
+    - Intended to be subclassed (or used with a mixin) to implement specific game state 
+    synchronization logic (`handle_network_state`, `get_local_state`).
 """
 
 from simpleGE import simpleGE
@@ -12,7 +25,7 @@ import socket, threading, pickle, struct, uuid, time
 VERBOSE = False
 
 # --- Global Constants ---
-DEFAULT_GAME_ID = "simpleGE_Game"
+DEFAULT_GAME_ID = "simpleGE Game"
 DEFAULT_TCP_PORT = 12345
 BROADCAST_PORT = 12346
 DISCONNECT_TIMEOUT = 5.0
@@ -26,82 +39,121 @@ UDP_BUFFER_SIZE = 4096
 
 class NetUtils:
     @staticmethod
-    def log(msg, tag="NETWORK"):
+    def debug_log(message, tag="NETWORK"):
+        """Prints a timestamped log message if VERBOSE is True."""
         if VERBOSE:
             timestamp = time.strftime("%H:%M:%S")
-            print(f"[{timestamp}][{tag}] {msg}")
+            print(f"[{timestamp}][{tag}] {message}")
 
     @staticmethod
-    def send_tcp_msg(sock, data):
-        """Pickles data and sends it with a 4-byte length header over TCP."""
+    def send_object_over_tcp(socket_obj, object_data):
+        """Pickles an object and sends it with a 4-byte length header over TCP."""
         try:
-            msg = pickle.dumps(data)
+            msg = pickle.dumps(object_data)
             msg = struct.pack('>I', len(msg)) + msg
-            sock.sendall(msg)
+            socket_obj.sendall(msg)
         except (ConnectionError, OSError):
             pass
 
     @staticmethod
-    def recv_tcp_msg(sock):
-        """Receives a length header and then the pickled payload over TCP."""
+    def receive_object_over_tcp(socket_obj):
+        """Receives a length header and then the pickled object payload over TCP."""
         try:
-            raw_msglen = NetUtils.recvall(sock, 4)
+            raw_msglen = NetUtils.receive_all_bytes(socket_obj, 4)
             if not raw_msglen: 
-                NetUtils.log("Failed to read length header", "RECV_TCP")
+                NetUtils.debug_log("Failed to read length header", "RECV_TCP")
                 return None
             msglen = struct.unpack('>I', raw_msglen)[0]
-            data = NetUtils.recvall(sock, msglen)
+            data = NetUtils.receive_all_bytes(socket_obj, msglen)
             if not data: 
-                NetUtils.log("Failed to read data payload", "RECV_TCP")
+                NetUtils.debug_log("Failed to read data payload", "RECV_TCP")
                 return None
             return pickle.loads(data)
         except (ConnectionError, OSError, pickle.UnpicklingError) as e:
-            NetUtils.log(f"error: {e}", "RECV_TCP")
+            NetUtils.debug_log(f"error: {e}", "RECV_TCP")
             return None
 
     @staticmethod
-    def recvall(sock, n):
-        """Helper to ensure exactly n bytes are read."""
+    def receive_all_bytes(socket_obj, num_bytes):
+        """Helper to ensure exactly num_bytes are read from the socket."""
         data = b''
-        while len(data) < n:
-            packet = sock.recv(n - len(data))
+        while len(data) < num_bytes:
+            packet = socket_obj.recv(num_bytes - len(data))
             if not packet: return None
             data += packet
         return data
 
-# --- Classes ---
-
 class NetManager:
     @staticmethod
     def find_games_on_lan(target_game_id=DEFAULT_GAME_ID, broadcast_port=BROADCAST_PORT, timeout=DISCOVERY_TIMEOUT):
+        """
+        Searches for active games on the LAN by broadcasting a discovery packet.
+        Returns a list of found host dictionaries.
+        """
         discovered_hosts = []
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.settimeout(1.0)
+        sock = NetManager._create_discovery_socket(broadcast_port)
+        
         try:
-            sock.bind(('', broadcast_port))
             print(f"Searching for games ('{target_game_id}') on LAN for {timeout}s...")
-            end_time = time.time() + timeout
-            while time.time() < end_time:
-                try:
-                    data, addr = sock.recvfrom(UDP_BUFFER_SIZE)
-                    message = pickle.loads(data)
-                    if message.get("game_id") == target_game_id:
-                        host_info = {
-                            "name": message.get("host_name", addr[0]),
-                            "ip": addr[0],
-                            "tcp_port": message.get("tcp_port"),
-                            "game_id": message.get("game_id")
-                        }
-                        if not any(h['ip'] == host_info['ip'] and h['tcp_port'] == host_info['tcp_port'] for h in discovered_hosts):
-                            discovered_hosts.append(host_info)
-                            print(f"Found: {host_info['name']} at {host_info['ip']}:{host_info['tcp_port']}")
-                except socket.timeout: continue
-                except (pickle.UnpicklingError, EOFError, KeyError): continue
+            NetManager._listen_for_discovery_responses(sock, discovered_hosts, target_game_id, timeout)
         finally:
             sock.close()
-        if not discovered_hosts: print("No matching games found.")
+            
+        if not discovered_hosts: 
+            print("No matching games found.")
         return discovered_hosts
+
+    @staticmethod
+    def _create_discovery_socket(broadcast_port):
+        """Creates and binds a UDP socket for discovery."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.settimeout(1.0) # Non-blocking (ish) receive
+        # We bind to the broadcast port to listen for responses? 
+        # Wait, usually we bind to 0.0.0.0 ephemeral to send, and server replies to us.
+        # But the original code bound to broadcast_port.
+        # Re-reading original logic: `sock.bind(('', broadcast_port))`
+        # This implies it listens on the broadcast port?
+        # Actually, typically client binds to ephemeral, sends to broadcast port (server listens there).
+        # BUT here it seems the client binds to the broadcast port to receive? 
+        # Let's stick to original logic: sock.bind(('', broadcast_port))
+        try:
+            sock.bind(('', broadcast_port))
+        except OSError:
+            pass # Port might be in use, but we might still be able to recv if SO_REUSEADDR works
+        return sock
+
+    @staticmethod
+    def _listen_for_discovery_responses(sock, discovered_hosts, target_game_id, timeout):
+        """Loops and listens for broadcast packets until timeout."""
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            try:
+                data, addr = sock.recvfrom(UDP_BUFFER_SIZE)
+                NetManager._process_discovery_packet(data, addr, discovered_hosts, target_game_id)
+            except socket.timeout: 
+                continue
+            except (pickle.UnpicklingError, EOFError, KeyError): 
+                continue
+
+    @staticmethod
+    def _process_discovery_packet(data, addr, discovered_hosts, target_game_id):
+        """Parses a discovery packet and adds it to the list if valid."""
+        try:
+            message = pickle.loads(data)
+            if message.get("game_id") == target_game_id:
+                host_info = {
+                    "name": message.get("host_name", addr[0]),
+                    "ip": addr[0],
+                    "tcp_port": message.get("tcp_port"),
+                    "game_id": message.get("game_id")
+                }
+                # Avoid duplicates
+                if not any(h['ip'] == host_info['ip'] and h['tcp_port'] == host_info['tcp_port'] for h in discovered_hosts):
+                    discovered_hosts.append(host_info)
+                    print(f"Found: {host_info['name']} at {host_info['ip']}:{host_info['tcp_port']}")
+        except Exception:
+            pass
 
 class Server:
     def __init__(self, host, tcp_port, broadcast_port, game_id=DEFAULT_GAME_ID):
@@ -150,25 +202,28 @@ class Server:
         while self.running:
             try:
                 data, addr = self.udp_sock.recvfrom(UDP_BUFFER_SIZE)
-                try:
-                    client_id, payload = pickle.loads(data)
-                    if VERBOSE: self.log(f"UDP: Received from {client_id} at {addr}: {payload}")
-                    
-                    with self.lock:
-                        if client_id not in self.client_map:
-                            self.client_map[client_id] = addr
-                            if VERBOSE: self.log(f"UDP: Added {client_id} to client_map: {addr}")
-                            
-                        self.game_state[client_id] = payload
-                        if VERBOSE: self.log(f"UDP: Updated game_state for {client_id}. Current state keys: {list(self.game_state.keys())}")
-                        
-                    self._broadcast_udp_state()
-                except (pickle.UnpicklingError, ValueError) as e:
-                    if VERBOSE: self.log(f"UDP: Error unpickling/unpacking data from {addr}: {e}, Data: {data}")
-                    continue
+                self._process_client_packet(data, addr)
             except OSError as e:
                 if VERBOSE: self.log(f"UDP: OSError in listener: {e}")
                 break
+
+    def _process_client_packet(self, data, addr):
+        """Unpacks client data and updates game state."""
+        try:
+            client_id, payload = pickle.loads(data)
+            if VERBOSE: self.log(f"UDP: Received from {client_id} at {addr}: {payload}")
+            
+            with self.lock:
+                if client_id not in self.client_map:
+                    self.client_map[client_id] = addr
+                    if VERBOSE: self.log(f"UDP: Added {client_id} to client_map: {addr}")
+                    
+                self.game_state[client_id] = payload
+                if VERBOSE: self.log(f"UDP: Updated game_state for {client_id}. Current state keys: {list(self.game_state.keys())}")
+                
+            self._broadcast_udp_state()
+        except (pickle.UnpicklingError, ValueError) as e:
+            if VERBOSE: self.log(f"UDP: Error unpickling/unpacking data from {addr}: {e}, Data: {data}")
 
     def _broadcast_udp_state(self):
         """Packs entire game state and blasts it to all known UDP clients."""
@@ -190,7 +245,7 @@ class Server:
         """Handles handshake: Checks ID, exchanges UDP ports."""
         try:
             # 1. Handshake
-            handshake = NetUtils.recv_tcp_msg(client_sock)
+            handshake = NetUtils.receive_object_over_tcp(client_sock)
             if not handshake or handshake.get("game_id") != self.game_id:
                 client_sock.close()
                 return
@@ -199,7 +254,7 @@ class Server:
             with self.lock: self.clients_tcp.append(client_sock)
 
             # 2. Send Assigned ID + Server UDP Port
-            NetUtils.send_tcp_msg(client_sock, {
+            NetUtils.send_object_over_tcp(client_sock, {
                 "type": "id_assignment",
                 "id": client_id,
                 "udp_port": self.udp_port
@@ -209,7 +264,7 @@ class Server:
 
             # 3. Keep TCP open for lifecycle events (ping/disconnect)
             while True:
-                msg = NetUtils.recv_tcp_msg(client_sock)
+                msg = NetUtils.receive_object_over_tcp(client_sock)
                 if msg is None: break 
                 # Handle other TCP messages (chat, etc) if needed
                 
@@ -257,6 +312,15 @@ class NetSprite(simpleGE.Sprite):
             self.x, self.y, self.imageAngle = state
 
 class NetworkScene(simpleGE.Scene):
+    """
+    A simpleGE Scene that handles client-server networking.
+    
+    This class manages the network loop (receiving updates, sending state).
+    It is designed to be subclassed. Subclasses must override:
+    - handle_network_state(self, state): To apply server updates to the local game.
+    - get_local_state(self): To provide the local data to send to the server.
+    - on_server_disconnect(self): To handle connection loss.
+    """
     def __init__(self, host, port, game_id=DEFAULT_GAME_ID):
         super().__init__()
         self.host = host
@@ -354,7 +418,8 @@ class Client:
         self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # Set a timeout for UDP socket to detect disconnects more actively
-        self.udp_sock.settimeout(UDP_SOCKET_TIMEOUT) 
+        self.udp_sock.settimeout(UDP_SOCKET_TIMEOUT)
+        self.tcp_sock.settimeout(CONNECTION_TIMEOUT)
         self.host = host
         self.id = None
         self.server_udp_port = None
@@ -365,17 +430,16 @@ class Client:
         self.last_packet_time = time.time()
 
         try:
-            self.tcp_sock.settimeout(CONNECTION_TIMEOUT) # 7 second timeout for connection
             if VERBOSE: self.log(f"Connecting to {host}:{port}...")
+            
             # TCP Handshake
             self.tcp_sock.connect((host, port))
-            self.tcp_sock.settimeout(None) # Remove timeout (or set to something else) for normal operations
             if VERBOSE: self.log("Connected. Sending handshake...")
-            NetUtils.send_tcp_msg(self.tcp_sock, {"game_id": game_id})
+            NetUtils.send_object_over_tcp(self.tcp_sock, {"game_id": game_id})
             
             # Wait for assignment
             if VERBOSE: self.log("Waiting for ID assignment...")
-            response = NetUtils.recv_tcp_msg(self.tcp_sock)
+            response = NetUtils.receive_object_over_tcp(self.tcp_sock)
             if response and response.get("type") == "id_assignment":
                 self.id = response["id"]
                 self.server_udp_port = response["udp_port"]
@@ -402,43 +466,50 @@ class Client:
 
     def _listen_udp(self):
         """Receives game state updates via UDP."""
+        
         # Send a dummy packet first so server knows our UDP address
         if self.id and self.server_udp_port:
             if VERBOSE: self.log("Sending initial registration packet.")
             self.send_update("init")
         
-        self.last_packet_time = time.time() # Reset timer on start
+        self.last_packet_time = time.time()
 
-        while self.running and self.connected: # Loop while connected
+        while self.running and self.connected:
             try:
                 data, _ = self.udp_sock.recvfrom(UDP_BUFFER_SIZE)
-                self.last_packet_time = time.time() # Update heartbeat
-                
-                state = pickle.loads(data)
-                if VERBOSE: self.log(f"Received state. Keys: {list(state.keys())}")
-                with self.lock: self.latest_state = state
+                self._handle_udp_packet(data)
             except socket.timeout:
-                # Check if we have timed out completely
-                if time.time() - self.last_packet_time > DISCONNECT_TIMEOUT:
-                    self.log(f"Connection timed out (no data for {DISCONNECT_TIMEOUT}s).")
-                    self.connected = False
-                    break
-                
-                if VERBOSE: self.log("UDP socket timed out, checking connection status.")
-                continue
+                self._handle_timeout()
             except (ConnectionError, OSError) as e:
                 self.log(f"Connection lost: {e}")
                 self.connected = False
-                break # Exit loop on connection error
+                break
             except Exception as e:
                 self.log(f"Error receiving state: {e}")
                 break
+
+    def _handle_udp_packet(self, data):
+        """Process received UDP data."""
+        self.last_packet_time = time.time()
+        try:
+            state = pickle.loads(data)
+            if VERBOSE: self.log(f"Received state. Keys: {list(state.keys())}")
+            with self.lock: self.latest_state = state
+        except (pickle.UnpicklingError, ValueError) as e:
+            if VERBOSE: self.log(f"Error processing packet: {e}")
+
+    def _handle_timeout(self):
+        """Handle socket timeout and check for disconnection."""
+        if time.time() - self.last_packet_time > DISCONNECT_TIMEOUT:
+            self.log(f"Connection timed out (no data for {DISCONNECT_TIMEOUT}s).")
+            self.connected = False
+        elif VERBOSE: 
+            self.log("UDP socket timed out, checking connection status.")
 
     def send_update(self, data):
         """Packs data using pickle and sends via UDP."""
         if not (self.running and self.id and self.server_udp_port and self.connected): return
         try:
-            # Send tuple: (client_id, payload)
             packet = pickle.dumps((self.id, data))
             if VERBOSE: self.log(f"Sending update (size {len(packet)} bytes). Payload: {data}")
             self.udp_sock.sendto(packet, (self.host, self.server_udp_port))
