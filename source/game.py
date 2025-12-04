@@ -1,16 +1,13 @@
 import pygame
 import multiplayerSimpleGE
 
-GAME_ID = "Red Ball Game"
+GAME_ID = "Red Square Game"
 VERBOSE = False
 
-class RedBall(multiplayerSimpleGE.NetSprite):
+class RedSquare(multiplayerSimpleGE.NetSprite):
     def __init__(self, scene, is_local=False):
         super().__init__(scene, is_local)
-        self.image = pygame.Surface((30, 30), pygame.SRCALPHA)
-        pygame.draw.circle(self.image, (255, 0, 0), (15, 15), 15)
-        self.imageMaster = self.image
-        self.rect = self.image.get_rect()
+        self.colorRect(pygame.Color("red"), (30, 30))
         self.moveSpeed = 5
 
     def process(self):
@@ -117,14 +114,21 @@ class GameLogicMixin:
         else:
             if VERBOSE: print(f"GameLogicMixin ({self.local_client_id}): No sprites to remove.")
 
+    def on_server_disconnect(self):
+        """Handle server disconnection specifically for this game."""
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print("!!!!!!!!!!!!!!!! SERVER DISCONNECTED !!!!!!!!!!!!!!!!")
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        self.stop()
+
 class HostGameScene(GameLogicMixin, multiplayerSimpleGE.HostScene):
-    def __init__(self, host='0.0.0.0', tcp_port=12345, broadcast_port=12346, sprite_class=RedBall, game_id=GAME_ID):
+    def __init__(self, host='0.0.0.0', tcp_port=12345, broadcast_port=12346, sprite_class=RedSquare, game_id=GAME_ID):
         super().__init__(host, tcp_port, broadcast_port, game_id)
         self.init_game_logic(sprite_class)
         self.register_local_player()
 
 class ClientGameScene(GameLogicMixin, multiplayerSimpleGE.ClientScene):
-    def __init__(self, host, port=12345, sprite_class=RedBall, game_id=GAME_ID):
+    def __init__(self, host, port=12345, sprite_class=RedSquare, game_id=GAME_ID):
         super().__init__(host, port, game_id)
         self.init_game_logic(sprite_class)
         self.register_local_player()

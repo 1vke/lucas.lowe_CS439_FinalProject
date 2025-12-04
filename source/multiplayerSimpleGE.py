@@ -10,45 +10,52 @@ from simpleGE import simpleGE
 import socket, threading, pickle, struct, uuid, time
 
 VERBOSE = False
+DISCONNECT_TIMEOUT = 5.0 # Seconds before client declares connection lost
 
-# --- Network Helper Functions ---
+class NetUtils:
+    @staticmethod
+    def log(msg, tag="NETWORK"):
+        if VERBOSE:
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"[{timestamp}][{tag}] {msg}")
 
-def send_tcp_msg(sock, data):
-    """Pickles data and sends it with a 4-byte length header over TCP."""
-    try:
-        msg = pickle.dumps(data)
-        msg = struct.pack('>I', len(msg)) + msg
-        sock.sendall(msg)
-    except (ConnectionError, OSError):
-        pass
+    @staticmethod
+    def send_tcp_msg(sock, data):
+        """Pickles data and sends it with a 4-byte length header over TCP."""
+        try:
+            msg = pickle.dumps(data)
+            msg = struct.pack('>I', len(msg)) + msg
+            sock.sendall(msg)
+        except (ConnectionError, OSError):
+            pass
 
-def recv_tcp_msg(sock):
-    """Receives a length header and then the pickled payload over TCP."""
-    try:
-        raw_msglen = recvall(sock, 4)
-        if not raw_msglen: 
-            if VERBOSE: print("recv_tcp_msg: Failed to read length header")
+    @staticmethod
+    def recv_tcp_msg(sock):
+        """Receives a length header and then the pickled payload over TCP."""
+        try:
+            raw_msglen = NetUtils.recvall(sock, 4)
+            if not raw_msglen: 
+                NetUtils.log("Failed to read length header", "RECV_TCP")
+                return None
+            msglen = struct.unpack('>I', raw_msglen)[0]
+            data = NetUtils.recvall(sock, msglen)
+            if not data: 
+                NetUtils.log("Failed to read data payload", "RECV_TCP")
+                return None
+            return pickle.loads(data)
+        except (ConnectionError, OSError, pickle.UnpicklingError) as e:
+            NetUtils.log(f"error: {e}", "RECV_TCP")
             return None
-        msglen = struct.unpack('>I', raw_msglen)[0]
-        data = recvall(sock, msglen)
-        if not data: 
-            if VERBOSE: print("recv_tcp_msg: Failed to read data payload")
-            return None
-        return pickle.loads(data)
-    except (ConnectionError, OSError, pickle.UnpicklingError) as e:
-        if VERBOSE: print(f"recv_tcp_msg error: {e}")
-        return None
 
-def recvall(sock, n):
-    """Helper to ensure exactly n bytes are read."""
-    data = b''
-    while len(data) < n:
-        packet = sock.recv(n - len(data))
-        if not packet: return None
-        data += packet
-    return data
-
-# --- Classes ---
+    @staticmethod
+    def recvall(sock, n):
+        """Helper to ensure exactly n bytes are read."""
+        data = b''
+        while len(data) < n:
+            packet = sock.recv(n - len(data))
+            if not packet: return None
+            data += packet
+        return data
 
 class NetManager:
     @staticmethod
@@ -101,18 +108,22 @@ class Server:
         self.udp_sock.bind((self.host, 0)) # Bind to ephemeral port
         self.udp_port = self.udp_sock.getsockname()[1]
 
+    def log(self, msg):
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"[{timestamp}][SERVER] {msg}")
+
     def start(self):
         threading.Thread(target=self._run_tcp_server, daemon=True).start()
         threading.Thread(target=self._run_udp_listener, daemon=True).start()
         threading.Thread(target=self._run_udp_broadcast, daemon=True).start()
-        print(f"Server UDP listening on port {self.udp_port}")
+        self.log(f"UDP listening on port {self.udp_port}")
 
     def _run_tcp_server(self):
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((self.host, self.tcp_port))
         server_sock.listen()
-        print(f"Game server ('{self.game_id}') listening on {self.host}:{self.tcp_port}")
+        self.log(f"Game server ('{self.game_id}') listening on {self.host}:{self.tcp_port}")
         
         while self.running:
             try:
@@ -127,22 +138,22 @@ class Server:
                 data, addr = self.udp_sock.recvfrom(4096)
                 try:
                     client_id, payload = pickle.loads(data)
-                    if VERBOSE: print(f"Server UDP: Received from {client_id} at {addr}: {payload}")
+                    if VERBOSE: self.log(f"UDP: Received from {client_id} at {addr}: {payload}")
                     
                     with self.lock:
                         if client_id not in self.client_map:
                             self.client_map[client_id] = addr
-                            if VERBOSE: print(f"Server UDP: Added {client_id} to client_map: {addr}")
+                            if VERBOSE: self.log(f"UDP: Added {client_id} to client_map: {addr}")
                             
                         self.game_state[client_id] = payload
-                        if VERBOSE: print(f"Server UDP: Updated game_state for {client_id}. Current state keys: {list(self.game_state.keys())}")
+                        if VERBOSE: self.log(f"UDP: Updated game_state for {client_id}. Current state keys: {list(self.game_state.keys())}")
                         
                     self._broadcast_udp_state()
                 except (pickle.UnpicklingError, ValueError) as e:
-                    if VERBOSE: print(f"Server UDP: Error unpickling/unpacking data from {addr}: {e}, Data: {data}")
+                    if VERBOSE: self.log(f"UDP: Error unpickling/unpacking data from {addr}: {e}, Data: {data}")
                     continue
             except OSError as e:
-                if VERBOSE: print(f"Server UDP: OSError in listener: {e}")
+                if VERBOSE: self.log(f"UDP: OSError in listener: {e}")
                 break
 
     def _broadcast_udp_state(self):
@@ -150,22 +161,22 @@ class Server:
         try:
             with self.lock:
                 if not self.client_map: 
-                    # print("Server UDP: No clients to broadcast to.") # Not printing every time for brevity
+                    # self.log("UDP: No clients to broadcast to.") # Not printing every time for brevity
                     return
                 payload = pickle.dumps(self.game_state)
-                if VERBOSE: print(f"Server UDP: Broadcasting state (size {len(payload)} bytes) to {len(self.client_map)} clients. State keys: {list(self.game_state.keys())}")
+                if VERBOSE: self.log(f"UDP: Broadcasting state (size {len(payload)} bytes) to {len(self.client_map)} clients. State keys: {list(self.game_state.keys())}")
                 
                 for cid, addr in self.client_map.items():
-                    # print(f"Server UDP: Sending to {cid} at {addr}") # Not printing every time for brevity
+                    # self.log(f"UDP: Sending to {cid} at {addr}") # Not printing every time for brevity
                     self.udp_sock.sendto(payload, addr)
         except Exception as e:
-            if VERBOSE: print(f"Server UDP: Error broadcasting state: {e}")
+            if VERBOSE: self.log(f"UDP: Error broadcasting state: {e}")
 
     def _handle_client_tcp(self, client_sock):
         """Handles handshake: Checks ID, exchanges UDP ports."""
         try:
             # 1. Handshake
-            handshake = recv_tcp_msg(client_sock)
+            handshake = NetUtils.recv_tcp_msg(client_sock)
             if not handshake or handshake.get("game_id") != self.game_id:
                 client_sock.close()
                 return
@@ -174,22 +185,22 @@ class Server:
             with self.lock: self.clients_tcp.append(client_sock)
 
             # 2. Send Assigned ID + Server UDP Port
-            send_tcp_msg(client_sock, {
+            NetUtils.send_tcp_msg(client_sock, {
                 "type": "id_assignment",
                 "id": client_id,
                 "udp_port": self.udp_port
             })
             
-            print(f"Client {client_id} connected via TCP.")
+            self.log(f"Client {client_id} connected via TCP.")
 
             # 3. Keep TCP open for lifecycle events (ping/disconnect)
             while True:
-                msg = recv_tcp_msg(client_sock)
+                msg = NetUtils.recv_tcp_msg(client_sock)
                 if msg is None: break 
                 # Handle other TCP messages (chat, etc) if needed
                 
         except Exception as e:
-            print(f"TCP Error {client_id}: {e}")
+            self.log(f"TCP Error {client_id}: {e}")
         finally:
             with self.lock:
                 if client_sock in self.clients_tcp: self.clients_tcp.remove(client_sock)
@@ -200,7 +211,7 @@ class Server:
 
                 if client_id in self.client_map: del self.client_map[client_id]
             client_sock.close()
-            print(f"Client {client_id} disconnected.")
+            self.log(f"Client {client_id} disconnected.")
 
     def _run_udp_broadcast(self):
         """Discovery broadcast."""
@@ -212,7 +223,6 @@ class Server:
             except: pass
             time.sleep(2)
 
-# Kept as a utility, but not used by NetworkScene directly anymore
 class NetSprite(simpleGE.Sprite):
     def __init__(self, scene, is_local=False):
         super().__init__(scene)
@@ -241,6 +251,10 @@ class NetworkScene(simpleGE.Scene):
         self.local_client_id = None # Will be set by the Client after ID assignment
     
     def process(self):
+        if self.client and not self.client.get_connected_status():
+            self.on_server_disconnect()
+            return # Stop processing if disconnected
+
         self._update_from_network()
         self._send_local_state()
 
@@ -269,6 +283,11 @@ class NetworkScene(simpleGE.Scene):
         """Override to return data to send to server."""
         return None
 
+    def on_server_disconnect(self):
+        """Override to handle server disconnection."""
+        print("Server disconnected. Stopping scene.")
+        self.stop()
+
     def stop(self):
         if self.client: self.client.stop()
         super().stop()
@@ -279,12 +298,18 @@ class HostScene(NetworkScene):
         self.server.start()
         super().__init__('127.0.0.1', tcp_port, game_id)
         self.setCaption(f"{game_id} (HOST)")
+        
+        self.connection_successful = False # Track if initial connection was successful
         self.client = Client('127.0.0.1', tcp_port, game_id)
         self._wait_for_id()
+        if self.client.get_connected_status():
+            self.connection_successful = True
+        else:
+            print("[HOST SCENE] Initial client connection to server failed.")
 
     def _wait_for_id(self):
         start = time.time()
-        while not self.client.id and time.time() - start < 2.0:
+        while not self.client.id and time.time() - start < 2.0 and self.client.connected:
             time.sleep(0.05)
         if self.client.id:
             self.local_client_id = self.client.id
@@ -293,12 +318,18 @@ class ClientScene(NetworkScene):
     def __init__(self, host, port=12345, game_id="simpleGE_Game"):
         super().__init__(host, port, game_id)
         self.setCaption(f"{game_id} (Client at {host})")
+        
+        self.connection_successful = False # Track if initial connection was successful
         self.client = Client(self.host, port, game_id)
         self._wait_for_id()
+        if self.client.get_connected_status():
+            self.connection_successful = True
+        else:
+            print("[CLIENT SCENE] Initial client connection to server failed.")
 
     def _wait_for_id(self):
         start = time.time()
-        while not self.client.id and time.time() - start < 2.0:
+        while not self.client.id and time.time() - start < 2.0 and self.client.connected:
             time.sleep(0.05)
         if self.client.id:
             self.local_client_id = self.client.id
@@ -307,70 +338,107 @@ class Client:
     def __init__(self, host, port, game_id="simpleGE_Game"):
         self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Set a timeout for UDP socket to detect disconnects more actively
+        self.udp_sock.settimeout(1.0) 
         self.host = host
         self.id = None
         self.server_udp_port = None
         self.latest_state = {}
         self.lock = threading.Lock()
         self.running = True
+        self.connected = False # Connection status flag
+        self.last_packet_time = time.time()
 
         try:
-            if VERBOSE: print(f"Client connecting to {host}:{port}...")
+            self.tcp_sock.settimeout(7.0) # 7 second timeout for connection
+            if VERBOSE: self.log(f"Connecting to {host}:{port}...")
             # TCP Handshake
             self.tcp_sock.connect((host, port))
-            if VERBOSE: print("Client connected. Sending handshake...")
-            send_tcp_msg(self.tcp_sock, {"game_id": game_id})
+            self.tcp_sock.settimeout(None) # Remove timeout (or set to something else) for normal operations
+            if VERBOSE: self.log("Connected. Sending handshake...")
+            NetUtils.send_tcp_msg(self.tcp_sock, {"game_id": game_id})
             
             # Wait for assignment
-            if VERBOSE: print("Client waiting for ID assignment...")
-            response = recv_tcp_msg(self.tcp_sock)
+            if VERBOSE: self.log("Waiting for ID assignment...")
+            response = NetUtils.recv_tcp_msg(self.tcp_sock)
             if response and response.get("type") == "id_assignment":
                 self.id = response["id"]
                 self.server_udp_port = response["udp_port"]
-                print(f"Assigned ID: {self.id}. Server UDP at port {self.server_udp_port}")
+                self.connected = True # Successfully connected
+                self.log(f"Assigned ID: {self.id}. Server UDP at port {self.server_udp_port}")
             else:
-                print(f"Client received unexpected response: {response}")
+                self.log(f"Received unexpected response: {response}")
             
             # Start Listeners
             threading.Thread(target=self._listen_udp, daemon=True).start()
             
         except Exception as e:
-            print(f"Connection Error: {e}")
+            self.log(f"Connection Error: {e}")
             self.running = False
+
+    def log(self, msg):
+        timestamp = time.strftime("%H:%M:%S")
+        if self.id:
+            short_id = self.id[-8:]
+            tag = f"[CLIENT {short_id}]"
+        else:
+            tag = "[CLIENT]"
+        print(f"[{timestamp}]{tag} {msg}")
 
     def _listen_udp(self):
         """Receives game state updates via UDP."""
         # Send a dummy packet first so server knows our UDP address
         if self.id and self.server_udp_port:
-            if VERBOSE: print(f"Client UDP ({self.id}): Sending initial registration packet.")
+            if VERBOSE: self.log("Sending initial registration packet.")
             self.send_update("init")
+        
+        self.last_packet_time = time.time() # Reset timer on start
 
-        while self.running:
+        while self.running and self.connected: # Loop while connected
             try:
                 data, _ = self.udp_sock.recvfrom(4096)
+                self.last_packet_time = time.time() # Update heartbeat
+                
                 state = pickle.loads(data)
-                if VERBOSE: print(f"Client UDP ({self.id}): Received state. Keys: {list(state.keys())}")
+                if VERBOSE: self.log(f"Received state. Keys: {list(state.keys())}")
                 with self.lock: self.latest_state = state
+            except socket.timeout:
+                # Check if we have timed out completely
+                if time.time() - self.last_packet_time > DISCONNECT_TIMEOUT:
+                    self.log(f"Connection timed out (no data for {DISCONNECT_TIMEOUT}s).")
+                    self.connected = False
+                    break
+                
+                if VERBOSE: self.log("UDP socket timed out, checking connection status.")
+                continue
+            except (ConnectionError, OSError) as e:
+                self.log(f"Connection lost: {e}")
+                self.connected = False
+                break # Exit loop on connection error
             except Exception as e:
-                if VERBOSE: print(f"Client UDP ({self.id}): Error receiving state: {e}")
+                self.log(f"Error receiving state: {e}")
                 break
 
     def send_update(self, data):
         """Packs data using pickle and sends via UDP."""
-        if not (self.running and self.id and self.server_udp_port): return
+        if not (self.running and self.id and self.server_udp_port and self.connected): return
         try:
             # Send tuple: (client_id, payload)
             packet = pickle.dumps((self.id, data))
-            if VERBOSE: print(f"Client UDP ({self.id}): Sending update (size {len(packet)} bytes). Payload: {data}")
+            if VERBOSE: self.log(f"Sending update (size {len(packet)} bytes). Payload: {data}")
             self.udp_sock.sendto(packet, (self.host, self.server_udp_port))
         except Exception as e:
-            if VERBOSE: print(f"Client UDP ({self.id}): Error sending update: {e}")
+            if VERBOSE: self.log(f"Error sending update: {e}")
 
     def get_latest_state(self):
         with self.lock: return self.latest_state.copy()
 
+    def get_connected_status(self):
+        return self.connected
+
     def stop(self):
         self.running = False
+        self.connected = False
         try: self.tcp_sock.close()
         except: pass
         try: self.udp_sock.close()
