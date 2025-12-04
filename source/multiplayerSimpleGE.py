@@ -23,7 +23,9 @@ Key Features:
 """
 
 from simpleGE import simpleGE
-import socket, threading, pickle, struct, uuid, time
+from bleak import BleakScanner, BleakError
+from bleak.exc import BleakBluetoothNotAvailableError
+import asyncio, socket, threading, pickle, struct, uuid, time
 
 VERBOSE = False
 
@@ -200,6 +202,59 @@ class LANDiscoveryService(DiscoveryService):
                     print(f"Found: {host_info['name']} at {host_info['ip']}:{host_info['tcp_port']}")
         except Exception:
             pass
+
+class BLEDiscoveryService(DiscoveryService):
+    """
+    Implements game discovery via Bluetooth Low Energy (BLE).
+    Note: Bleak is primarily a Client (Central) library. Advertising (Peripheral role) 
+    is not natively supported on all platforms by Bleak.
+    """
+    def __init__(self):
+        pass
+
+    def start_advertising(self, game_id, port):
+        """
+        BLE Advertising is not supported by Bleak.
+        To advertise, you would need a platform-specific tool or a library that supports Peripheral role.
+        """
+        NetUtils.debug_log("BLE Advertising not supported by Bleak (Central-only).", "BLE")
+
+    def stop_advertising(self):
+        pass
+
+    def find_games(self, game_id, timeout):
+        """Scans for BLE devices using BleakScanner."""
+        print(f"Scanning for BLE devices (heuristic: name contains '{game_id}')...")
+        try:
+            return asyncio.run(self._scan(game_id, timeout))
+        except BleakBluetoothNotAvailableError as e:
+            NetUtils.debug_log(f"Bluetooth not available: {e} (Reason: {e.reason})", "BLE")
+            return []
+        except BleakError as e:
+            NetUtils.debug_log(f"Bleak error during scan: {e}", "BLE")
+            return []
+        except Exception as e:
+            NetUtils.debug_log(f"Unexpected error during BLE scan: {e}", "BLE")
+            return []
+
+    async def _scan(self, game_id, timeout):
+        discovered_hosts = []
+        try:
+            devices = await BleakScanner.discover(timeout=timeout)
+            for d in devices:
+                # Heuristic: Check if device name matches game_id
+                if d.name and game_id in d.name:
+                    NetUtils.debug_log(f"Found matching BLE device: {d.name} ({d.address})", "BLE")
+                    # Placeholder: We can't extract IP/Port easily without a custom protocol
+                    # host_info = { "name": d.name, "ip": "???", "tcp_port": ???, "game_id": game_id }
+                    # discovered_hosts.append(host_info)
+        except Exception as e:
+            # Re-raise to be handled by find_games or let it bubble up if it's a critical BleakError
+            raise e
+        
+        if not discovered_hosts:
+            print("No matching BLE games found.")
+        return discovered_hosts
 
 # --- Managers & Core Classes ---
 
