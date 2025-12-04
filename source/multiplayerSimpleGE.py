@@ -17,6 +17,9 @@ Key Features:
     - Provides a base `NetworkScene` that handles the networking loop.
     - Intended to be subclassed (or used with a mixin) to implement specific game state 
     synchronization logic (`handle_network_state`, `get_local_state`).
+- Pluggable Discovery:
+    - Supports different game discovery mechanisms (e.g., LAN Broadcast).
+    - Designed to be extensible for future methods like BLE.
 """
 
 from simpleGE import simpleGE
@@ -103,21 +106,57 @@ class NetUtils:
             data += packet
         return data
 
-class NetManager:
-    """Helper class for finding games on the local network."""
-    
-    @staticmethod
-    def find_games_on_lan(target_game_id=DEFAULT_GAME_ID, broadcast_port=BROADCAST_PORT, timeout=DISCOVERY_TIMEOUT):
-        """
-        Searches for active games on the LAN by broadcasting a discovery packet.
-        Returns a list of found host dictionaries.
-        """
+# --- Discovery Services ---
+
+class DiscoveryService:
+    """Abstract base class for game discovery mechanisms."""
+    def start_advertising(self, game_id, port):
+        """Start broadcasting/advertising the game."""
+        raise NotImplementedError
+
+    def stop_advertising(self):
+        """Stop broadcasting/advertising."""
+        raise NotImplementedError
+
+    def find_games(self, game_id, timeout):
+        """Search for games and return a list of host info dicts."""
+        raise NotImplementedError
+
+class LANDiscoveryService(DiscoveryService):
+    """Implements game discovery via UDP Broadcast on the LAN."""
+    def __init__(self, broadcast_port=BROADCAST_PORT):
+        self.broadcast_port = broadcast_port
+        self.advertising = False
+        self.sock = None
+
+    def start_advertising(self, game_id, port):
+        """Starts a background thread to broadcast presence."""
+        self.advertising = True
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        
+        threading.Thread(target=self._broadcast_loop, args=(game_id, port), daemon=True).start()
+
+    def stop_advertising(self):
+        self.advertising = False
+        if self.sock:
+            self.sock.close()
+
+    def _broadcast_loop(self, game_id, port):
+        while self.advertising:
+            msg = {"game_id": game_id, "host_name": socket.gethostname(), "tcp_port": port}
+            try: 
+                self.sock.sendto(pickle.dumps(msg), ('<broadcast>', self.broadcast_port))
+            except: pass
+            time.sleep(BROADCAST_INTERVAL)
+
+    def find_games(self, game_id, timeout):
         discovered_hosts = []
-        sock = NetManager._create_discovery_socket(broadcast_port)
+        sock = self._create_discovery_socket()
         
         try:
-            print(f"Searching for games ('{target_game_id}') on LAN for {timeout}s...")
-            NetManager._listen_for_discovery_responses(sock, discovered_hosts, target_game_id, timeout)
+            print(f"Searching for games ('{game_id}') on LAN for {timeout}s...")
+            self._listen_for_responses(sock, discovered_hosts, game_id, timeout)
         finally:
             sock.close()
             
@@ -125,36 +164,28 @@ class NetManager:
             print("No matching games found.")
         return discovered_hosts
 
-    @staticmethod
-    def _create_discovery_socket(broadcast_port):
-        """Creates and binds a UDP socket for discovery listening."""
+    def _create_discovery_socket(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.settimeout(1.0)
-        
         try:
-            # Bind to all interfaces on the broadcast port to hear announcements
-            sock.bind(('', broadcast_port))
+            sock.bind(('', self.broadcast_port))
         except OSError:
             pass 
         return sock
 
-    @staticmethod
-    def _listen_for_discovery_responses(sock, discovered_hosts, target_game_id, timeout):
-        """Loops and listens for broadcast packets until timeout."""
+    def _listen_for_responses(self, sock, discovered_hosts, target_game_id, timeout):
         end_time = time.time() + timeout
         while time.time() < end_time:
             try:
                 data, addr = sock.recvfrom(UDP_BUFFER_SIZE)
-                NetManager._process_discovery_packet(data, addr, discovered_hosts, target_game_id)
+                self._process_packet(data, addr, discovered_hosts, target_game_id)
             except socket.timeout: 
                 continue
             except (pickle.UnpicklingError, EOFError, KeyError): 
                 continue
 
-    @staticmethod
-    def _process_discovery_packet(data, addr, discovered_hosts, target_game_id):
-        """Parses a discovery packet and adds it to the list if valid."""
+    def _process_packet(self, data, addr, discovered_hosts, target_game_id):
         try:
             message = pickle.loads(data)
             if message.get("game_id") == target_game_id:
@@ -164,22 +195,38 @@ class NetManager:
                     "tcp_port": message.get("tcp_port"),
                     "game_id": message.get("game_id")
                 }
-                # Avoid duplicates
                 if not any(h['ip'] == host_info['ip'] and h['tcp_port'] == host_info['tcp_port'] for h in discovered_hosts):
                     discovered_hosts.append(host_info)
                     print(f"Found: {host_info['name']} at {host_info['ip']}:{host_info['tcp_port']}")
         except Exception:
             pass
 
+# --- Managers & Core Classes ---
+
+class NetManager:
+    """Helper class for managing game discovery."""
+    @staticmethod
+    def find_games(discovery_service=None, target_game_id=DEFAULT_GAME_ID, timeout=DISCOVERY_TIMEOUT):
+        """
+        Uses the provided discovery service to find games. 
+        Defaults to LANDiscoveryService if none provided.
+        """
+        if discovery_service is None:
+            discovery_service = LANDiscoveryService()
+        
+        return discovery_service.find_games(target_game_id, timeout)
+
 class Server:
-    def __init__(self, host, tcp_port, broadcast_port, game_id=DEFAULT_GAME_ID):
+    def __init__(self, host, tcp_port, broadcast_port, game_id=DEFAULT_GAME_ID, discovery_service=None):
         self.host = host
         self.tcp_port = tcp_port
-        self.broadcast_port = broadcast_port
         self.game_id = game_id
         
-        self.game_state = {} # Generic game state: client_id -> data payload
-        self.client_map = {} # Maps client_id -> (IP, UDP_Port)
+        # Use provided discovery service or default to LAN
+        self.discovery_service = discovery_service if discovery_service else LANDiscoveryService(broadcast_port)
+        
+        self.game_state = {} 
+        self.client_map = {} 
         self.clients_tcp = []
         
         self.lock = threading.Lock()
@@ -187,7 +234,7 @@ class Server:
 
         # Initialize UDP Socket for game updates
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_sock.bind((self.host, 0)) # Bind to ephemeral port
+        self.udp_sock.bind((self.host, 0)) 
         self.udp_port = self.udp_sock.getsockname()[1]
 
     def log(self, msg):
@@ -195,10 +242,13 @@ class Server:
         print(f"[{timestamp}][SERVER] {msg}")
 
     def start(self):
-        """Starts all server threads (TCP, UDP listener, UDP broadcast)."""
+        """Starts all server threads and discovery."""
         threading.Thread(target=self._run_tcp_server, daemon=True).start()
         threading.Thread(target=self._run_udp_listener, daemon=True).start()
-        threading.Thread(target=self._run_udp_broadcast, daemon=True).start()
+        
+        # Start advertising presence
+        self.discovery_service.start_advertising(self.game_id, self.tcp_port)
+        
         self.log(f"UDP listening on port {self.udp_port}")
 
     def _run_tcp_server(self):
@@ -285,7 +335,6 @@ class Server:
             while True:
                 msg = NetUtils.receive_object_over_tcp(client_sock)
                 if msg is None: break 
-                # Potential for chat messages or reliable events here
                 
         except Exception as e:
             self.log(f"TCP Error {client_id}: {e}")
@@ -297,16 +346,6 @@ class Server:
                 if client_id in self.client_map: del self.client_map[client_id]
             client_sock.close()
             self.log(f"Client {client_id} disconnected.")
-
-    def _run_udp_broadcast(self):
-        """Periodically broadcasts server existence on LAN."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        while self.running:
-            msg = {"game_id": self.game_id, "host_name": socket.gethostname(), "tcp_port": self.tcp_port}
-            try: sock.sendto(pickle.dumps(msg), ('<broadcast>', self.broadcast_port))
-            except: pass
-            time.sleep(BROADCAST_INTERVAL)
 
 # Kept as a utility base class for easy sprite networking
 class NetSprite(simpleGE.Sprite):
@@ -330,12 +369,6 @@ class NetSprite(simpleGE.Sprite):
 class NetworkScene(simpleGE.Scene):
     """
     A simpleGE Scene that handles client-server networking.
-    
-    This class manages the network loop (receiving updates, sending state).
-    It is designed to be subclassed. Subclasses must override:
-    - handle_network_state(self, state): To apply server updates to the local game.
-    - get_local_state(self): To provide the local data to send to the server.
-    - on_server_disconnect(self): To handle connection loss.
     """
     def __init__(self, host, port, game_id=DEFAULT_GAME_ID):
         super().__init__()
@@ -388,13 +421,14 @@ class NetworkScene(simpleGE.Scene):
         super().stop()
 
 class HostScene(NetworkScene):
-    def __init__(self, host='0.0.0.0', tcp_port=DEFAULT_TCP_PORT, broadcast_port=BROADCAST_PORT, game_id=DEFAULT_GAME_ID):
-        self.server = Server(host, tcp_port, broadcast_port, game_id)
+    def __init__(self, host='0.0.0.0', tcp_port=DEFAULT_TCP_PORT, broadcast_port=BROADCAST_PORT, game_id=DEFAULT_GAME_ID, discovery_service=None):
+        # Initialize server with optional custom discovery service
+        self.server = Server(host, tcp_port, broadcast_port, game_id, discovery_service)
         self.server.start()
         super().__init__('127.0.0.1', tcp_port, game_id)
         self.setCaption(f"{game_id} (HOST)")
         
-        self.connection_successful = False # Track if initial connection was successful
+        self.connection_successful = False 
         self.client = Client('127.0.0.1', tcp_port, game_id)
         self._wait_for_id()
         if self.client.get_connected_status():
@@ -415,7 +449,7 @@ class ClientScene(NetworkScene):
         super().__init__(host, port, game_id)
         self.setCaption(f"{game_id} (Client at {host})")
         
-        self.connection_successful = False # Track if initial connection was successful
+        self.connection_successful = False 
         self.client = Client(self.host, port, game_id)
         self._wait_for_id()
         if self.client.get_connected_status():
