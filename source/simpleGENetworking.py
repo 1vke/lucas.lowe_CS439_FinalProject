@@ -22,8 +22,8 @@ Key Features:
     - Designed to be extensible for future methods like BLE.
 """
 
-from simpleGE import simpleGE
-import asyncio, socket, threading, pickle, struct, uuid, time
+from source.simpleGE import simpleGE
+import socket, threading, pickle, struct, uuid, time
 
 VERBOSE = False
 

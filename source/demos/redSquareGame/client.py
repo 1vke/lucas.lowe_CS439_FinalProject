@@ -1,5 +1,12 @@
-import simpleGENetworking
-from game import RedSquare, GAME_ID, ClientGameScene
+import sys, os
+# Add project root to sys.path to allow absolute imports from 'source'
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "../../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from source import simpleGENetworking
+from source.demos.redSquareGame import RedSquare, GAME_ID, ClientGameScene
 
 def main():
     print(f"Looking for games with ID: '{GAME_ID}'...")

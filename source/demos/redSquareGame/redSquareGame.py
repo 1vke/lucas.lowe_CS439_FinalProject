@@ -1,5 +1,9 @@
+if __name__ == "__main__":
+    print("Please run server.py or client.py!")
+    exit(1)
+
 import pygame
-import simpleGENetworking
+from source import simpleGENetworking
 
 GAME_ID = "Red Square Game"
 VERBOSE = False
