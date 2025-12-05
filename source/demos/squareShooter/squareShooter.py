@@ -1,7 +1,11 @@
-import pygame
-import random
-import time
-import sys
+import pygame, random, time, sys, os
+
+# Setup path to allow absolute imports from 'source'
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "../../.."))
+if project_root not in sys.path:
+	sys.path.insert(0, project_root)
+
 from source import simpleGENetworking
 from source.simpleGE import simpleGE
 
@@ -17,6 +21,7 @@ BULLET_LIFETIME = 2.0 # seconds
 class Bullet(simpleGENetworking.NetSprite):
     def __init__(self, scene, parent, target_pos):
         super().__init__(scene, is_local=True)
+        self.type = "bullet"
         self.parent = parent # The Player object who shot this
         self.owner_id = parent.net_id
         self.colorRect((255, 255, 255), (BULLET_SIZE, BULLET_SIZE))
@@ -39,9 +44,10 @@ class Bullet(simpleGENetworking.NetSprite):
                 self.kill()
                 return
             
-            # Bounds check (simpleGE handles basic bounds, but let's kill if off screen)
-            if not self.rect.colliderect(self.scene.background.get_rect()):
-                self.kill()
+			# TODO: See if this is needed
+            # # Bounds check (simpleGE handles basic bounds, but let's kill if off screen)
+            # if not self.rect.colliderect(self.scene.background.get_rect()):
+            #     self.kill()
 
     def get_net_state(self):
         # (net_id, sprite_id, x, y, angle, color(dummy), name(dummy), type, owner_id)
@@ -50,6 +56,7 @@ class Bullet(simpleGENetworking.NetSprite):
 class Player(simpleGENetworking.NetSprite):
     def __init__(self, scene, name, is_local=False):
         super().__init__(scene, is_local)
+        self.type = "player"
         self.name = name
         self.kills = 0
         self.deaths = 0
@@ -76,7 +83,7 @@ class Player(simpleGENetworking.NetSprite):
             if self.isKeyPressed(pygame.K_s) or self.isKeyPressed(pygame.K_DOWN):
                 self.y += self.moveSpeed
             
-            # Manual Bounds Checking (simpleGE STOP action only resets speed)
+            # Manual Bounds Checking
             if self.x < 0: self.x = 0
             if self.x > self.screenWidth: self.x = self.screenWidth
             if self.y < 0: self.y = 0
@@ -92,6 +99,7 @@ class Player(simpleGENetworking.NetSprite):
     def shoot(self):
         target = pygame.mouse.get_pos()
         bullet = Bullet(self.scene, self, target)
+        
         # Add to scene's managed sprites so it gets synced
         self.scene.add_local_sprite(bullet)
 
@@ -107,8 +115,9 @@ class ShooterLogicMixin:
         self.addGroup(self.net_sprite_group)
         
         self.local_player = None
-        self.local_kill_event = None # Stores ID of killer if we died this frame
+        self.client_names = {} # {client_id: name}
         self.leaderboard = {} # {name: kills}
+        self.destroyed_queue = [] # [sprite_id] to tell others to kill
         
         # UI
         self.lbl_leaderboard = simpleGE.MultiLabel()
@@ -134,35 +143,13 @@ class ShooterLogicMixin:
 
     def process(self):
         super().process()
-        self.check_collisions()
         self.update_leaderboard_ui()
 
-    def check_collisions(self):
-        """Local player checks if they are hit by ANY bullet (local or remote)."""
-        if not self.local_player: return
-        
-        # Iterate through all sprites to find bullets
-        for sprite in self.net_sprite_group:
-            # "sprite" here could be a remote NetSprite (Bullet or Player)
-            # We need to identify if it's a bullet.
-            # Since remote sprites are generic NetSprites instantiated dynamically, 
-            # we need a way to know their type.
-            # We'll attach 'type' and 'owner_id' to remote sprites in handle_network_state.
-            
-            if getattr(sprite, 'type', '') == 'bullet':
-                if sprite.owner_id != self.local_client_id: # Don't hit self
-                    if self.local_player.collidesWith(sprite):
-                        print(f"Hit by bullet from {sprite.owner_id}!")
-                        self.die(sprite.owner_id)
-                        # Optimization: Kill bullet locally immediately (visuals)
-                        sprite.hide() 
-                        break
-
-    def die(self, killer_id):
-        self.local_kill_event = killer_id
+    def die(self):
         # Respawn
-        self.local_player.x = random.randint(50, WINDOW_SIZE[0]-50)
-        self.local_player.y = random.randint(50, WINDOW_SIZE[1]-50)
+        if self.local_player:
+            self.local_player.x = random.randint(50, WINDOW_SIZE[0]-50)
+            self.local_player.y = random.randint(50, WINDOW_SIZE[1]-50)
 
     def update_leaderboard_ui(self):
         lines = ["LEADERBOARD"]
@@ -191,16 +178,19 @@ class ShooterLogicMixin:
 
         payload = {
             "sprites": sprite_states,
-            "kill_event": self.local_kill_event,
             "name": self.player_name # Send name so Host knows who we are for leaderboard
         }
         
-        # Reset event
-        self.local_kill_event = None
-        
-        # If I am Host, I also include the full leaderboard
+        # If I am Host, I also include the full leaderboard and kill events
         if isinstance(self, ShooterHost):
-            payload["leaderboard"] = self.leaderboard_state
+            payload["leaderboard"] = self.leaderboard
+            if self.kill_queue:
+                payload["kill_events"] = self.kill_queue[:]
+                self.kill_queue.clear()
+            if self.destroyed_queue:
+                payload["destroyed_sprites"] = self.destroyed_queue[:]
+                self.destroyed_queue.clear()
+            payload["client_names"] = self.client_names
             
         return payload
 
@@ -251,7 +241,29 @@ class ShooterLogicMixin:
             if "leaderboard" in payload:
                 self.leaderboard = payload["leaderboard"]
 
-        # 3. Cleanup missing remote sprites
+            # 3. Handle Kill Events (from Host)
+            if "kill_events" in payload:
+                # Update client_names from host if available
+                if "client_names" in payload:
+                    self.client_names.update(payload["client_names"])
+
+                for event in payload["kill_events"]:
+                    # If I am the victim, I die
+                    if event.get("victim") == self.local_client_id:
+                        killer_id = event.get("killer")
+                        killer_name = self.client_names.get(killer_id, "Unknown Player")
+                        print(f"I was killed by {killer_name}!")
+                        self.die()
+                    
+                    # If I am the killer, I destroy my bullet
+                    if event.get("killer") == self.local_client_id:
+                        bullet_id = event.get("bullet_id")
+                        if bullet_id and bullet_id in self.managed_sprites:
+                            # print(f"My bullet {bullet_id} hit someone! destroying it.")
+                            self.managed_sprites[bullet_id].kill()
+                            del self.managed_sprites[bullet_id]
+
+        # 4. Cleanup missing remote sprites
         to_delete = []
         for sid, sprite in self.managed_sprites.items():
             if not sprite.is_local and sid not in current_remote_sprites:
@@ -267,52 +279,69 @@ class ShooterHost(ShooterLogicMixin, simpleGENetworking.HostScene):
         super().__init__(host=host, game_id=GAME_ID, window_size=WINDOW_SIZE)
         self.sprites = []
         self.init_game_logic(name)
-        self.leaderboard_state = {} # {name: kills}
         self.client_names = {} # {client_id: name}
+        self.kill_queue = []
 
     def process(self):
         self.register_local_player()
-        super().process()
+        self.check_collisions()
+        # Call Mixin's process (which calls super().process -> NetworkScene.process)
+        ShooterLogicMixin.process(self)
         
+    def check_collisions(self):
+        players = []
+        bullets = []
+        
+        for sprite in self.net_sprite_group:
+            s_type = getattr(sprite, 'type', None)
+            if s_type == "player":
+                players.append(sprite)
+            elif s_type == "bullet":
+                bullets.append(sprite)
+                
+        # O(N*M) collision check
+        for bullet in bullets:
+            for player in players:
+                # Don't shoot self
+                if bullet.owner_id == player.net_id:
+                    continue
+                
+                if bullet.rect.colliderect(player.rect):
+                    # Collision detected by Host
+                    self.handle_kill(player.net_id, bullet.owner_id, bullet.sprite_id)
+                    bullet.kill() # Destroy bullet locally
+                    break 
+
+    def handle_kill(self, victim_id, killer_id, bullet_id=None):
+        killer_name = self.client_names.get(killer_id, "Unknown")
+        victim_name = self.client_names.get(victim_id, "Unknown")
+        
+        if killer_name in self.leaderboard:
+            self.leaderboard[killer_name] += 1
+        else:
+            self.leaderboard[killer_name] = 1
+            
+        print(f"[HOST] {killer_name} killed {victim_name}")
+        
+        # If Host died, handle locally
+        if victim_id == self.local_client_id:
+            print(f"I (Host) was killed by {killer_name}!")
+            self.die()
+        
+        self.kill_queue.append({
+            "victim": victim_id, 
+            "killer": killer_id,
+            "bullet_id": bullet_id
+        })
+
     def handle_network_state(self, server_state):
         super().handle_network_state(server_state)
         
-        # Host-specific logic: Aggregate scores
-        # Check for kill events in ALL payloads (including our own if we were a client, 
-        # but local_state isn't in server_state usually for local client. 
-        # Wait, simpleGE HostScene IS a client too. 
-        # But handle_network_state usually skips local_client_id. 
-        # We need to process our OWN kill events too if we want to score ourselves?
-        # Actually, if *I* die, *someone else* gets a point. 
-        # If I kill someone, *they* send the event saying "I died to HostID".
-        
-        # So we iterate ALL payloads to find "kill_event"
-        
-        # NOTE: "server_state" passed to handle_network_state in simpleGENetworking 
-        # comes from self.client.get_latest_state(), which is the UDP broadcast.
-        # It contains EVERYONE's state, including the Host's own client state.
-        # But ShooterLogicMixin skips local_client_id.
-        # We need to peek at everything for events.
-        
         for client_id, payload in server_state.items():
-            if not isinstance(payload, dict): continue
-            
-            # Update Name Map
-            if "name" in payload:
+            if isinstance(payload, dict) and "name" in payload:
                 self.client_names[client_id] = payload["name"]
-                if payload["name"] not in self.leaderboard_state:
-                    self.leaderboard_state[payload["name"]] = 0
-
-            # Process Kill
-            killer_id = payload.get("kill_event")
-            if killer_id:
-                # Find name of killer
-                killer_name = self.client_names.get(killer_id, "Unknown")
-                if killer_name in self.leaderboard_state:
-                    self.leaderboard_state[killer_name] += 1
-                else:
-                    self.leaderboard_state[killer_name] = 1
-                print(f"Kill confirmed: {killer_name} killed {self.client_names.get(client_id, 'someone')}")
+                if payload["name"] not in self.leaderboard:
+                    self.leaderboard[payload["name"]] = 0
 
 class ShooterClient(ShooterLogicMixin, simpleGENetworking.ClientScene):
     def __init__(self, name, host):
