@@ -42,7 +42,7 @@ ID_WAIT_TIMEOUT = 2.0
 ID_WAIT_INTERVAL = 0.05
 UDP_SOCKET_TIMEOUT = 1.0
 BROADCAST_INTERVAL = 2
-UDP_BUFFER_SIZE = 4096
+UDP_BUFFER_SIZE = 65536
 
 class NetUtils:
 	"""Utility class for common network operations (logging, TCP sending/receiving)."""
@@ -389,8 +389,8 @@ class NetworkScene(simpleGE.Scene):
 	"""
 	A simpleGE Scene that handles client-server networking.
 	"""
-	def __init__(self, host, port, game_id=DEFAULT_GAME_ID):
-		super().__init__()
+	def __init__(self, host, port, game_id=DEFAULT_GAME_ID, window_size=(640, 480)):
+		super().__init__(window_size)
 		self.host = host
 		self.port = port
 		self.game_id = game_id
@@ -440,11 +440,11 @@ class NetworkScene(simpleGE.Scene):
 		super().stop()
 
 class HostScene(NetworkScene):
-	def __init__(self, host='0.0.0.0', tcp_port=DEFAULT_TCP_PORT, broadcast_port=BROADCAST_PORT, game_id=DEFAULT_GAME_ID, discovery_service=None):
+	def __init__(self, host='0.0.0.0', tcp_port=DEFAULT_TCP_PORT, broadcast_port=BROADCAST_PORT, game_id=DEFAULT_GAME_ID, discovery_service=None, window_size=(640, 480)):
 		# Initialize server with optional custom discovery service
 		self.server = Server(host, tcp_port, broadcast_port, game_id, discovery_service)
 		self.server.start()
-		super().__init__('127.0.0.1', tcp_port, game_id)
+		super().__init__('127.0.0.1', tcp_port, game_id, window_size)
 		self.setCaption(f"{game_id} (HOST)")
 		
 		self.connection_successful = False 
@@ -464,8 +464,8 @@ class HostScene(NetworkScene):
 			self.local_client_id = self.client.id
 
 class ClientScene(NetworkScene):
-	def __init__(self, host, port=DEFAULT_TCP_PORT, game_id=DEFAULT_GAME_ID):
-		super().__init__(host, port, game_id)
+	def __init__(self, host, port=DEFAULT_TCP_PORT, game_id=DEFAULT_GAME_ID, window_size=(640, 480)):
+		super().__init__(host, port, game_id, window_size)
 		self.setCaption(f"{game_id} (Client at {host})")
 		
 		self.connection_successful = False 
