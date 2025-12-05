@@ -1,4 +1,4 @@
-import multiplayerSimpleGE
+import simpleGENetworking
 from game import RedSquare, GAME_ID, HostGameScene
 
 def main():

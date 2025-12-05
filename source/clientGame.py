@@ -1,12 +1,12 @@
-import multiplayerSimpleGE
+import simpleGENetworking
 from game import RedSquare, GAME_ID, ClientGameScene
 
 def main():
     print(f"Looking for games with ID: '{GAME_ID}'...")
     
     # Use LANDiscoveryService to find games
-    lan_discovery = multiplayerSimpleGE.LANDiscoveryService()
-    hosts = multiplayerSimpleGE.NetManager.find_games(
+    lan_discovery = simpleGENetworking.LANDiscoveryService()
+    hosts = simpleGENetworking.NetManager.find_games(
         discovery_service=lan_discovery, 
         target_game_id=GAME_ID
     )
@@ -25,7 +25,7 @@ def main():
         manual_ip = input("Enter Server IP manually (or press Enter to quit): ")
         if manual_ip:
             try:
-                game = ClientGameScene(host=manual_ip, port=multiplayerSimpleGE.DEFAULT_TCP_PORT, sprite_class=RedSquare, game_id=GAME_ID)
+                game = ClientGameScene(host=manual_ip, port=simpleGENetworking.DEFAULT_TCP_PORT, sprite_class=RedSquare, game_id=GAME_ID)
             except Exception as e:
                 print(f"Could not connect to {manual_ip}: {e}")
         else:

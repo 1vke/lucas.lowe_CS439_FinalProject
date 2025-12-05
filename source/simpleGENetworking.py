@@ -1,5 +1,5 @@
 """
-multiplayerSimpleGE.py
+simpleGENetworking.py
 
 Extends simpleGE with a client-server multiplayer framework.
 

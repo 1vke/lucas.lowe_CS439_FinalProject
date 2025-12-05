@@ -1,10 +1,10 @@
 import pygame
-import multiplayerSimpleGE
+import simpleGENetworking
 
 GAME_ID = "Red Square Game"
 VERBOSE = False
 
-class RedSquare(multiplayerSimpleGE.NetSprite):
+class RedSquare(simpleGENetworking.NetSprite):
     def __init__(self, scene, is_local=False):
         super().__init__(scene, is_local)
         self.colorRect(pygame.Color("red"), (30, 30))
@@ -121,13 +121,13 @@ class GameLogicMixin:
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         self.stop()
 
-class HostGameScene(GameLogicMixin, multiplayerSimpleGE.HostScene):
+class HostGameScene(GameLogicMixin, simpleGENetworking.HostScene):
     def __init__(self, host='0.0.0.0', tcp_port=12345, broadcast_port=12346, sprite_class=RedSquare, game_id=GAME_ID, discovery_service=None):
         super().__init__(host, tcp_port, broadcast_port, game_id, discovery_service=discovery_service)
         self.init_game_logic(sprite_class)
         self.register_local_player()
 
-class ClientGameScene(GameLogicMixin, multiplayerSimpleGE.ClientScene):
+class ClientGameScene(GameLogicMixin, simpleGENetworking.ClientScene):
     def __init__(self, host, port=12345, sprite_class=RedSquare, game_id=GAME_ID):
         super().__init__(host, port, game_id)
         self.init_game_logic(sprite_class)
