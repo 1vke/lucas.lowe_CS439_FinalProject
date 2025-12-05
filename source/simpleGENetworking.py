@@ -22,6 +22,10 @@ Key Features:
     - Designed to be extensible for future methods like BLE.
 """
 
+if __name__ == "__main__":
+    print("Do not run directly, see docs.")
+    exit(1)
+
 from source.simpleGE import simpleGE
 import socket, threading, pickle, struct, uuid, time
 

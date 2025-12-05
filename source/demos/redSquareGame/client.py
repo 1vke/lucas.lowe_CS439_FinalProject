@@ -6,7 +6,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from source import simpleGENetworking
-from source.demos.redSquareGame import RedSquare, GAME_ID, ClientGameScene
+from .redSquareGame import RedSquare, GAME_ID, ClientGameScene
 
 def main():
     print(f"Looking for games with ID: '{GAME_ID}'...")

@@ -5,7 +5,7 @@ project_root = os.path.abspath(os.path.join(current_dir, "../../.."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from redSquareGame import RedSquare, GAME_ID, HostGameScene
+from .redSquareGame import RedSquare, GAME_ID, HostGameScene
 
 def main():
     # Create the Host Scene with a specific Game ID
