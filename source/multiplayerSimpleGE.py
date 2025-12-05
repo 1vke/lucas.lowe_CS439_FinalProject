@@ -24,8 +24,7 @@ Key Features:
 
 from simpleGE import simpleGE
 from bless import BlessServer
-from bleak import BleakScanner, BleakError
-from bleak.exc import BleakBluetoothNotAvailableError
+from bleak import BleakScanner
 import asyncio, socket, threading, pickle, struct, uuid, time
 
 VERBOSE = False
@@ -255,7 +254,7 @@ class BLEDiscoveryService(DiscoveryService):
             # Note: We append the Game ID to the BLE Name (limited chars usually)
             service_name = f"G:{game_id}"[:20] 
             self.server = BlessServer(name=service_name)
-            self.server.add_new_service(self.GAME_SERVICE_UUID)
+            await self.server.add_new_service(self.GAME_SERVICE_UUID)
             
             # 3. Start Advertising with IP in Manufacturer Data (Key 0xFFFF is for testing)
             NetUtils.debug_log(f"Starting BLE Ad. Name: {service_name}, IP: {ip}", "BLE")
