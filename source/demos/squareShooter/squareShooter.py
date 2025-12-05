@@ -14,8 +14,8 @@ GAME_ID = "Square Shooter"
 WINDOW_SIZE = (1600, 900)
 PLAYER_SIZE = 30
 BULLET_SIZE = 5
-PLAYER_SPEED = 5
-BULLET_SPEED = 10
+PLAYER_SPEED = 7
+BULLET_SPEED = 20
 BULLET_LIFETIME = 2.0 # seconds
 
 class Bullet(simpleGENetworking.NetSprite):
@@ -27,7 +27,7 @@ class Bullet(simpleGENetworking.NetSprite):
         self.colorRect((255, 255, 255), (BULLET_SIZE, BULLET_SIZE))
         self.x = parent.x
         self.y = parent.y
-        self.boundAction = self.STOP
+        self.boundAction = self.CONTINUE
         
         # Calculate velocity
         angle = self.dirTo(target_pos)
@@ -108,6 +108,11 @@ class Player(simpleGENetworking.NetSprite):
         return (self.net_id, self.sprite_id, self.x, self.y, self.imageAngle, self.color, self.name, "player", self.net_id)
 
 class TransparentMultiLabel(simpleGE.MultiLabel):
+    def __init__(self):
+        super().__init__()
+        font_path = os.path.join(os.path.dirname(__file__), "04B_03__.TTF")
+        self.font = pygame.font.Font(font_path, 20)
+
     def update(self):
         self.checkEvents()
         self.process()
@@ -118,17 +123,18 @@ class TransparentMultiLabel(simpleGE.MultiLabel):
         self.image.fill(self.bgColor)
         
         numLines = len(self.textLines)
-        vSize = self.image.get_height() / numLines
+        lineHeight = self.font.get_linesize()
+        startY = 10  # Start 10 pixels from the top
         
         for lineNum in range(numLines):
             currentLine = self.textLines[lineNum]
             # Render text with a transparent background to avoid double-blending issues
             fontSurface = self.font.render(currentLine, True, self.fgColor, None)
             
-            # Center the text
+            # Center the text horizontally
             xPos = (self.image.get_width() - fontSurface.get_width())/2
-            yPos = lineNum * vSize
-            self.image.blit(fontSurface, (xPos, yPos + 15))
+            yPos = startY + (lineNum * lineHeight)
+            self.image.blit(fontSurface, (xPos, yPos))
         
         self.rect = self.image.get_rect()
         self.rect.center = self.center
@@ -146,7 +152,26 @@ class TransparentMultiLabel(simpleGE.MultiLabel):
 
 
 class ShooterLogicMixin:
+    def _setup_background(self):
+        # Set background to deep dark purple
+        self.background.fill((12, 0, 25))
+        
+        # Draw a white, transparent grid
+        grid_color = (255, 255, 255, 50)  # White with 20% opacity
+        grid_spacing = 50
+        bg_w, bg_h = self.background.get_size()
+        
+        grid_surface = pygame.Surface((bg_w, bg_h), pygame.SRCALPHA)
+        for x in range(0, bg_w, grid_spacing):
+            pygame.draw.line(grid_surface, grid_color, (x, 0), (x, bg_h))
+        for y in range(0, bg_h, grid_spacing):
+            pygame.draw.line(grid_surface, grid_color, (0, y), (bg_w, y))
+        
+        self.background.blit(grid_surface, (0, 0))
+
     def init_game_logic(self, player_name):
+        self._setup_background()
+
         self.player_name = player_name
         self.managed_sprites = {} # sprite_id -> NetSprite
         
@@ -195,7 +220,7 @@ class ShooterLogicMixin:
             self.local_player.y = random.randint(50, WINDOW_SIZE[1]-50)
 
     def update_leaderboard_ui(self):
-        lines = ["LEADERBOARD"]
+        lines = ["LEADERBOARD", "-----------"]
         # Sort by kills
         sorted_scores = sorted(self.leaderboard.items(), key=lambda item: item[1], reverse=True)
         for name, kills in sorted_scores:
