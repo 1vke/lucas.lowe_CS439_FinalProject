@@ -107,11 +107,51 @@ class Player(simpleGENetworking.NetSprite):
         # (net_id, sprite_id, x, y, angle, color, name, type, owner_id)
         return (self.net_id, self.sprite_id, self.x, self.y, self.imageAngle, self.color, self.name, "player", self.net_id)
 
+class TransparentMultiLabel(simpleGE.MultiLabel):
+    def update(self):
+        self.checkEvents()
+        self.process()
+        
+        # Create surface with SRCALPHA for transparency
+        self.image = pygame.Surface(self.size, pygame.SRCALPHA)
+        # Fill with the background color, which now correctly applies alpha
+        self.image.fill(self.bgColor)
+        
+        numLines = len(self.textLines)
+        vSize = self.image.get_height() / numLines
+        
+        for lineNum in range(numLines):
+            currentLine = self.textLines[lineNum]
+            # Render text with a transparent background to avoid double-blending issues
+            fontSurface = self.font.render(currentLine, True, self.fgColor, None)
+            
+            # Center the text
+            xPos = (self.image.get_width() - fontSurface.get_width())/2
+            yPos = lineNum * vSize
+            self.image.blit(fontSurface, (xPos, yPos + 15))
+        
+        self.rect = self.image.get_rect()
+        self.rect.center = self.center
+        
+        # Mouse interaction logic (from original simpleGE.MultiLabel)
+        self.clicked = False
+        if pygame.mouse.get_pressed() == (1, 0, 0):
+            if self.rect.collidepoint(pygame.mouse.get_pos()):
+                self.active = True
+        if self.active == True:
+            if pygame.mouse.get_pressed() == (0, 0, 0):
+                self.active = False
+                if self.rect.collidepoint(pygame.mouse.get_pos()):
+                    self.clicked = True
+
+
 class ShooterLogicMixin:
     def init_game_logic(self, player_name):
         self.player_name = player_name
         self.managed_sprites = {} # sprite_id -> NetSprite
-        self.net_sprite_group = self.makeSpriteGroup([])
+        
+        # Use LayeredUpdates to handle rendering order and prevent clearing issues
+        self.net_sprite_group = pygame.sprite.LayeredUpdates()
         self.addGroup(self.net_sprite_group)
         
         self.local_player = None
@@ -120,15 +160,18 @@ class ShooterLogicMixin:
         self.destroyed_queue = [] # [sprite_id] to tell others to kill
         
         # UI
-        self.lbl_leaderboard = simpleGE.MultiLabel()
+        self.lbl_leaderboard = TransparentMultiLabel()
         self.lbl_leaderboard.center = (100, 100)
         self.lbl_leaderboard.size = (200, 200)
         self.lbl_leaderboard.textLines = ["Leaderboard"]
         self.lbl_leaderboard.fgColor = (255, 255, 255)
         self.lbl_leaderboard.bgColor = (0, 0, 0, 100) # Transparent-ish
         self.lbl_leaderboard.clearBack = False # Alpha handled by bgColor
-        # self.addLabel(self.lbl_leaderboard) # Assuming Scene has addLabel or addGroup
-        self.groups.append(pygame.sprite.Group(self.lbl_leaderboard))
+        
+        # Add leaderboard to the main group with a high layer (default is 0)
+        # This ensures it is drawn on top, and because it's in the same group,
+        # clearing works correctly without erasing sprites underneath.
+        self.net_sprite_group.add(self.lbl_leaderboard, layer=100)
 
     def add_local_sprite(self, sprite):
         self.managed_sprites[sprite.sprite_id] = sprite
