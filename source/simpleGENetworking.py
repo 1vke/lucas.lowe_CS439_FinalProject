@@ -240,8 +240,8 @@ class Server:
 		self.tcp_port = tcp_port
 		self.game_id = game_id
 		
-		# Use provided discovery service or default to LAN
-		self.discovery_service = discovery_service if discovery_service else LANDiscoveryService(broadcast_port)
+		# Use provided discovery service or default to None
+		self.discovery_service = discovery_service
 		
 		self.game_state = {} 
 		self.client_map = {} 
@@ -265,7 +265,8 @@ class Server:
 		threading.Thread(target=self._run_udp_listener, daemon=True).start()
 		
 		# Start advertising presence
-		self.discovery_service.start_advertising(self.game_id, self.tcp_port)
+		if self.discovery_service:
+			self.discovery_service.start_advertising(self.game_id, self.tcp_port)
 		
 		self.log(f"UDP listening on port {self.udp_port}")
 
