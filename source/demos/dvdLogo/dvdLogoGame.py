@@ -249,7 +249,7 @@ class DvdClientScene(DraggableWindowMixin, simpleGENetworking.ClientScene):
 
 	def get_local_state(self):
 		"""Clients do not send local state in this demo."""
-		return []
+		return None
 
 	def handle_network_state(self, server_state):
 		"""
