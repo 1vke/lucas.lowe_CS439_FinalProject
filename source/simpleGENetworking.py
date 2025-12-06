@@ -43,7 +43,7 @@ ID_WAIT_INTERVAL = 0.05
 UDP_SOCKET_TIMEOUT = 1.0
 BROADCAST_INTERVAL = 2
 UDP_BUFFER_SIZE = 65536
-SERVER_TPS = 30 # Ticks per second for broadcast loop
+SERVER_TPS = 60 # Ticks per second for broadcast loop
 
 class NetUtils:
 	"""Utility class for common network operations (logging, TCP sending/receiving)."""

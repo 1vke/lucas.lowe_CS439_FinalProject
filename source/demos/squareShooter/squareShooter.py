@@ -36,6 +36,7 @@ class Bullet(simpleGENetworking.NetSprite):
         self.addForce(BULLET_SPEED, angle)
         
         self.birth_time = time.time()
+        self.has_hit = False # Track if bullet has already hit something (for Host)
 
     def process(self):
         if self.is_local:
@@ -44,11 +45,6 @@ class Bullet(simpleGENetworking.NetSprite):
                 self.kill()
                 return
             
-			# TODO: See if this is needed
-            # # Bounds check (simpleGE handles basic bounds, but let's kill if off screen)
-            # if not self.rect.colliderect(self.scene.background.get_rect()):
-            #     self.kill()
-
     def get_net_state(self):
         # (net_id, sprite_id, x, y, angle, color(dummy), name(dummy), type, owner_id)
         return (self.net_id, self.sprite_id, self.x, self.y, self.imageAngle, None, "", "bullet", self.owner_id)
@@ -88,7 +84,7 @@ class Player(simpleGENetworking.NetSprite):
             if self.x > self.screenWidth: self.x = self.screenWidth
             if self.y < 0: self.y = 0
             if self.y > self.screenHeight: self.y = self.screenHeight
-                
+            
             # Shooting
             if pygame.mouse.get_pressed()[0]:
                 now = time.time()
@@ -343,7 +339,6 @@ class ShooterLogicMixin:
                     if event.get("killer") == self.local_client_id:
                         bullet_id = event.get("bullet_id")
                         if bullet_id and bullet_id in self.managed_sprites:
-                            # print(f"My bullet {bullet_id} hit someone! destroying it.")
                             self.managed_sprites[bullet_id].kill()
                             del self.managed_sprites[bullet_id]
 
@@ -376,18 +371,34 @@ class ShooterHost(ShooterLogicMixin, simpleGENetworking.HostScene):
         ShooterLogicMixin.process(self)
         
     def check_collisions(self):
-        # Optimized collision detection using sprite groups
         collisions = pygame.sprite.groupcollide(self.bullet_group, self.player_group, False, False)
         
         for bullet, hit_players in collisions.items():
+            # If bullet is already spent, ignore it
+            if getattr(bullet, 'has_hit', False):
+                continue
+
             for player in hit_players:
                 # Don't shoot self
                 if bullet.owner_id == player.net_id:
                     continue
+
+                # Check for invulnerability window (prevent double-kills on laggy ghosts)
+                if time.time() - getattr(player, 'last_hit_time', 0) < 0.5:
+                    continue
                 
                 # Collision detected by Host
+                bullet.has_hit = True # Mark as spent so we don't process again
+                bullet.hide() # Hide locally so it looks destroyed
+                
+                # Mark player as hit recently
+                player.last_hit_time = time.time()
+                
                 self.handle_kill(player.net_id, bullet.owner_id, bullet.sprite_id)
-                bullet.kill() # Destroy bullet locally
+                # distinct change: DO NOT kill() here. 
+                # Leaving it alive prevents handle_network_state from resurrecting it.
+                # It will be killed eventually by Client (via event) or cleanup.
+                
                 break # Bullet hits one player and disappears 
 
     def handle_kill(self, victim_id, killer_id, bullet_id=None):
