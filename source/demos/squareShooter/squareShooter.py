@@ -68,7 +68,7 @@ class Player(simpleGENetworking.NetSprite):
         self.x = random.randint(50, WINDOW_SIZE[0]-50)
         self.y = random.randint(50, WINDOW_SIZE[1]-50)
         
-        self.cooldown = 0.2
+        self.cooldown = 0.001
         self.last_shot = 0
 
     def process(self):
@@ -179,6 +179,10 @@ class ShooterLogicMixin:
         self.net_sprite_group = pygame.sprite.LayeredUpdates()
         self.addGroup(self.net_sprite_group)
         
+        # Optimization groups
+        self.player_group = pygame.sprite.Group()
+        self.bullet_group = pygame.sprite.Group()
+        
         self.local_player = None
         self.client_names = {} # {client_id: name}
         self.leaderboard = {} # {name: kills}
@@ -201,6 +205,11 @@ class ShooterLogicMixin:
     def add_local_sprite(self, sprite):
         self.managed_sprites[sprite.sprite_id] = sprite
         self.net_sprite_group.add(sprite)
+        
+        if sprite.type == "player":
+            self.player_group.add(sprite)
+        elif sprite.type == "bullet":
+            self.bullet_group.add(sprite)
 
     def register_local_player(self):
         if self.local_client_id and not self.local_player:
@@ -238,7 +247,7 @@ class ShooterLogicMixin:
             # pygame.sprite.Sprite.alive() returns True if the sprite belongs to any groups.
             if not sprite.alive():
                  to_remove.append(sid)
-            else:
+            elif sprite.is_local:
                 sprite_states.append(sprite.get_net_state())
         
         for sid in to_remove:
@@ -284,6 +293,7 @@ class ShooterLogicMixin:
                     # Update existing
                     s = self.managed_sprites[sprite_id]
                     s.x, s.y, s.imageAngle = x, y, angle
+                    s.last_seen = time.time()
                     # Update visual rect
                     s.rect.center = (s.x, s.y)
                 else:
@@ -293,6 +303,7 @@ class ShooterLogicMixin:
                     new_s.sprite_id = sprite_id
                     new_s.type = s_type
                     new_s.owner_id = bullet_owner
+                    new_s.last_seen = time.time()
                     
                     # Setup visuals
                     if s_type == "player":
@@ -304,6 +315,11 @@ class ShooterLogicMixin:
                     new_s.x, new_s.y, new_s.imageAngle = x, y, angle
                     self.managed_sprites[sprite_id] = new_s
                     self.net_sprite_group.add(new_s)
+                    
+                    if s_type == "player":
+                        self.player_group.add(new_s)
+                    elif s_type == "bullet":
+                        self.bullet_group.add(new_s)
 
             # 2. Handle Leaderboard (from Host)
             if "leaderboard" in payload:
@@ -331,11 +347,14 @@ class ShooterLogicMixin:
                             self.managed_sprites[bullet_id].kill()
                             del self.managed_sprites[bullet_id]
 
-        # 4. Cleanup missing remote sprites
+        # 4. Cleanup missing remote sprites (with timeout for packet loss)
         to_delete = []
+        now = time.time()
         for sid, sprite in self.managed_sprites.items():
             if not sprite.is_local and sid not in current_remote_sprites:
-                to_delete.append(sid)
+                # If we haven't seen this sprite in > 200ms, assume it's gone
+                if now - getattr(sprite, 'last_seen', 0) > 0.2:
+                    to_delete.append(sid)
         
         for sid in to_delete:
             self.managed_sprites[sid].kill()
@@ -357,28 +376,19 @@ class ShooterHost(ShooterLogicMixin, simpleGENetworking.HostScene):
         ShooterLogicMixin.process(self)
         
     def check_collisions(self):
-        players = []
-        bullets = []
+        # Optimized collision detection using sprite groups
+        collisions = pygame.sprite.groupcollide(self.bullet_group, self.player_group, False, False)
         
-        for sprite in self.net_sprite_group:
-            s_type = getattr(sprite, 'type', None)
-            if s_type == "player":
-                players.append(sprite)
-            elif s_type == "bullet":
-                bullets.append(sprite)
-                
-        # O(N*M) collision check
-        for bullet in bullets:
-            for player in players:
+        for bullet, hit_players in collisions.items():
+            for player in hit_players:
                 # Don't shoot self
                 if bullet.owner_id == player.net_id:
                     continue
                 
-                if bullet.rect.colliderect(player.rect):
-                    # Collision detected by Host
-                    self.handle_kill(player.net_id, bullet.owner_id, bullet.sprite_id)
-                    bullet.kill() # Destroy bullet locally
-                    break 
+                # Collision detected by Host
+                self.handle_kill(player.net_id, bullet.owner_id, bullet.sprite_id)
+                bullet.kill() # Destroy bullet locally
+                break # Bullet hits one player and disappears 
 
     def handle_kill(self, victim_id, killer_id, bullet_id=None):
         killer_name = self.client_names.get(killer_id, "Unknown")

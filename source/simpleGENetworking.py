@@ -27,7 +27,7 @@ if __name__ == "__main__":
 	exit(1)
 
 from source.simpleGE import simpleGE
-import socket, threading, pickle, struct, uuid, time
+import socket, threading, pickle, struct, uuid, time, zlib
 
 VERBOSE = False
 
@@ -43,6 +43,7 @@ ID_WAIT_INTERVAL = 0.05
 UDP_SOCKET_TIMEOUT = 1.0
 BROADCAST_INTERVAL = 2
 UDP_BUFFER_SIZE = 65536
+SERVER_TPS = 30 # Ticks per second for broadcast loop
 
 class NetUtils:
 	"""Utility class for common network operations (logging, TCP sending/receiving)."""
@@ -263,6 +264,7 @@ class Server:
 		"""Starts all server threads and discovery."""
 		threading.Thread(target=self._run_tcp_server, daemon=True).start()
 		threading.Thread(target=self._run_udp_listener, daemon=True).start()
+		threading.Thread(target=self._run_broadcast_loop, daemon=True).start()
 		
 		# Start advertising presence
 		if self.discovery_service:
@@ -284,6 +286,17 @@ class Server:
 				threading.Thread(target=self._handle_client_tcp, args=(client_sock,), daemon=True).start()
 			except OSError: break
 
+	def _run_broadcast_loop(self):
+		"""Continuously broadcasts game state at a fixed tick rate."""
+		interval = 1.0 / SERVER_TPS
+		while self.running:
+			start_time = time.time()
+			self._broadcast_udp_state()
+			elapsed = time.time() - start_time
+			sleep_time = interval - elapsed
+			if sleep_time > 0:
+				time.sleep(sleep_time)
+
 	def _run_udp_listener(self):
 		"""Continuously receives UDP packets from clients."""
 		while self.running:
@@ -297,7 +310,9 @@ class Server:
 	def _process_client_packet(self, data, addr):
 		"""Unpacks client data, updates internal state, and broadcasts to all."""
 		try:
-			client_id, payload = pickle.loads(data)
+			# Decompress data
+			decompressed = zlib.decompress(data)
+			client_id, payload = pickle.loads(decompressed)
 			if VERBOSE: self.log(f"UDP: Received from {client_id} at {addr}: {payload}")
 			
 			with self.lock:
@@ -310,9 +325,7 @@ class Server:
 				self.game_state[client_id] = payload
 				if VERBOSE: self.log(f"UDP: Updated game_state for {client_id}. Current state keys: {list(self.game_state.keys())}")
 				
-			# Immediately echo the full game state back to all clients
-			self._broadcast_udp_state()
-		except (pickle.UnpicklingError, ValueError) as e:
+		except (zlib.error, pickle.UnpicklingError, ValueError) as e:
 			if VERBOSE: self.log(f"UDP: Error unpickling/unpacking data from {addr}: {e}, Data: {data}")
 
 	def _broadcast_udp_state(self):
@@ -321,10 +334,11 @@ class Server:
 			with self.lock:
 				if not self.client_map: 
 					return
-				payload = pickle.dumps(self.game_state)
+				raw_payload = pickle.dumps(self.game_state)
+				compressed_payload = zlib.compress(raw_payload)
 				
-				for cid, addr in self.client_map.items():
-					self.udp_sock.sendto(payload, addr)
+				for _, addr in self.client_map.items():
+					self.udp_sock.sendto(compressed_payload, addr)
 		except Exception as e:
 			if VERBOSE: self.log(f"UDP: Error broadcasting state: {e}")
 
@@ -373,8 +387,9 @@ class NetSprite(simpleGE.Sprite):
 		self.net_id = None # Owner's client ID
 		self.sprite_id = str(uuid.uuid4()) # Unique ID for this sprite
 		self.is_local = is_local
+		self.last_seen = time.time()
 		if not self.is_local: self.hide()
-
+		
 	def get_net_state(self):
 		# Return owner_id, sprite_id, x, y, angle
 		return (self.net_id, self.sprite_id, self.x, self.y, self.imageAngle)
@@ -565,10 +580,12 @@ class Client:
 		"""Process received UDP data."""
 		self.last_packet_time = time.time() # Update heartbeat timestamp
 		try:
-			state = pickle.loads(data)
+			# Decompress data
+			decompressed = zlib.decompress(data)
+			state = pickle.loads(decompressed)
 			if VERBOSE: self.log(f"Received state. Keys: {list(state.keys())}")
 			with self.lock: self.latest_state = state
-		except (pickle.UnpicklingError, ValueError) as e:
+		except (zlib.error, pickle.UnpicklingError, ValueError) as e:
 			if VERBOSE: self.log(f"Error processing packet: {e}")
 
 	def _handle_timeout(self):
@@ -584,9 +601,12 @@ class Client:
 		if not (self.running and self.id and self.server_udp_port and self.connected): return
 		try:
 			# Send tuple: (client_id, payload)
-			packet = pickle.dumps((self.id, data))
-			if VERBOSE: self.log(f"Sending update (size {len(packet)} bytes). Payload: {data}")
-			self.udp_sock.sendto(packet, (self.host, self.server_udp_port))
+			raw_packet = pickle.dumps((self.id, data))
+			# Compress the packet
+			compressed_packet = zlib.compress(raw_packet)
+			
+			if VERBOSE: self.log(f"Sending update (size {len(compressed_packet)} bytes). Payload: {data}")
+			self.udp_sock.sendto(compressed_packet, (self.host, self.server_udp_port))
 		except Exception as e:
 			if VERBOSE: self.log(f"Error sending update: {e}")
 
