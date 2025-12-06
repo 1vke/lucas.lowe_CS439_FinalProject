@@ -42,7 +42,7 @@ osascript <<EOF
 
     delay 3 # Give the host a moment to initialize the server
 
-    # Launch 9 Clients
+    # Launch 20 Clients
     repeat with i from 1 to 20
         tell application "Terminal"
             activate

@@ -4,6 +4,11 @@ Game logic for the DVD Logo Networking Demo.
 Defines the DraggableWindowMixin, DVDLogo sprite, and the
 Host (server) and Client (viewer) scenes.
 """
+
+if __name__ == "__main__":
+	print("Please run server.py or client.py!")
+	exit(1)
+
 import pygame
 import pygame._sdl2 as sdl2
 import random
