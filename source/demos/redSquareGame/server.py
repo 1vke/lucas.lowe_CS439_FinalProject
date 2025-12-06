@@ -1,12 +1,16 @@
 import sys, os
-# Add project root to sys.path to allow absolute imports from 'source'
+
+# Setup path to allow absolute imports from 'source'
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, "../../.."))
 if project_root not in sys.path:
 	sys.path.insert(0, project_root)
 
 from source import simpleGENetworking
-from .redSquareGame import RedSquare, GAME_ID, HostGameScene
+try:
+    from redSquareGame import RedSquare, GAME_ID, HostGameScene
+except ImportError:
+    from .redSquareGame import RedSquare, GAME_ID, HostGameScene
 
 def main():
 	# Create the Host Scene with a specific Game ID

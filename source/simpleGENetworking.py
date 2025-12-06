@@ -19,7 +19,11 @@ Key Features:
 	synchronization logic (`handle_network_state`, `get_local_state`).
 - Pluggable Discovery:
 	- Supports different game discovery mechanisms (e.g., LAN Broadcast).
-	- Designed to be extensible for future methods like BLE (if someone dares, lol).
+	- Designed to be extensible for future discovery protocols (e.g., Bluetooth (if someone dares, lol)).
+
+Security Warning:
+This module uses `pickle` for serialization. Only use this networking framework on trusted
+networks. Processing pickled data from untrusted sources is a security risk.
 """
 
 if __name__ == "__main__":
@@ -43,7 +47,7 @@ ID_WAIT_INTERVAL = 0.05
 UDP_SOCKET_TIMEOUT = 1.0
 BROADCAST_INTERVAL = 2
 UDP_BUFFER_SIZE = 65536
-SERVER_TPS = 60 # Ticks per second for broadcast loop
+SERVER_TPS = 30 # Ticks per second for broadcast loop
 
 class NetUtils:
 	"""Utility class for common network operations (logging, TCP sending/receiving)."""
@@ -170,6 +174,16 @@ class LANDiscoveryService(DiscoveryService):
 			time.sleep(BROADCAST_INTERVAL)
 
 	def find_games(self, game_id, timeout):
+		"""
+		Broadcasts a discovery request and listens for responses.
+		
+		Args:
+			game_id (str): The unique identifier of the game to search for.
+			timeout (int): Duration in seconds to listen for responses.
+			
+		Returns:
+			list[dict]: A list of found servers, each containing 'name', 'ip', and 'port'.
+		"""
 		discovered_hosts = []
 		sock = self._create_discovery_socket()
 		
@@ -236,6 +250,15 @@ class NetManager:
 		return discovery_service.find_games(target_game_id, timeout)
 
 class Server:
+	"""
+	The authoritative game server. 
+	
+	Handles:
+	- TCP connections for reliable client registration and ID assignment.
+	- UDP listener for receiving high-frequency game state updates from clients.
+	- UDP broadcast loop for sending the consolidated 'world state' to all clients.
+	- Game discovery advertisement (optional).
+	"""
 	def __init__(self, host, tcp_port, broadcast_port, game_id=DEFAULT_GAME_ID, discovery_service=None):
 		self.host = host
 		self.tcp_port = tcp_port
@@ -280,11 +303,14 @@ class Server:
 		server_sock.listen()
 		self.log(f"Game server ('{self.game_id}') listening on {self.host}:{self.tcp_port}")
 		
-		while self.running:
-			try:
-				client_sock, _ = server_sock.accept()
-				threading.Thread(target=self._handle_client_tcp, args=(client_sock,), daemon=True).start()
-			except OSError: break
+		try:
+			while self.running:
+				try:
+					client_sock, _ = server_sock.accept()
+					threading.Thread(target=self._handle_client_tcp, args=(client_sock,), daemon=True).start()
+				except OSError: break
+		finally:
+			server_sock.close()
 
 	def _run_broadcast_loop(self):
 		"""Continuously broadcasts game state at a fixed tick rate."""
@@ -335,7 +361,8 @@ class Server:
 				if not self.client_map: 
 					return
 				raw_payload = pickle.dumps(self.game_state)
-				compressed_payload = zlib.compress(raw_payload)
+				# Level 1 compression for speed
+				compressed_payload = zlib.compress(raw_payload, 1)
 				
 				for _, addr in self.client_map.items():
 					self.udp_sock.sendto(compressed_payload, addr)
@@ -500,6 +527,15 @@ class ClientScene(NetworkScene):
 			self.local_client_id = self.client.id
 
 class Client:
+	"""
+	The network client.
+	
+	Manages:
+	- Initial TCP handshake to connect to the server and receive a unique Client ID.
+	- UDP socket for sending local state updates and receiving world state broadcasts.
+	- Zlib compression/decompression of network packets.
+	- Connection health monitoring (heartbeat).
+	"""
 	def __init__(self, host, port, game_id=DEFAULT_GAME_ID):
 		self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 		self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -602,8 +638,8 @@ class Client:
 		try:
 			# Send tuple: (client_id, payload)
 			raw_packet = pickle.dumps((self.id, data))
-			# Compress the packet
-			compressed_packet = zlib.compress(raw_packet)
+			# Compress the packet (Level 1 for speed)
+			compressed_packet = zlib.compress(raw_packet, 1)
 			
 			if VERBOSE: self.log(f"Sending update (size {len(compressed_packet)} bytes). Payload: {data}")
 			self.udp_sock.sendto(compressed_packet, (self.host, self.server_udp_port))

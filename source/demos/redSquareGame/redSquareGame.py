@@ -9,6 +9,10 @@ GAME_ID = "Red Square Game"
 VERBOSE = False
 
 class RedSquare(simpleGENetworking.NetSprite):
+	"""
+	A simple networked sprite representing a player.
+	Moves with arrow keys if controlled locally.
+	"""
 	def __init__(self, scene, is_local=False):
 		super().__init__(scene, is_local)
 		self.colorRect(pygame.Color("red"), (30, 30))
@@ -120,9 +124,7 @@ class GameLogicMixin:
 
 	def on_server_disconnect(self):
 		"""Handle server disconnection specifically for this game."""
-		print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-		print("!!!!!!!!!!!!!!!! SERVER DISCONNECTED !!!!!!!!!!!!!!!!")
-		print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		print("\n[Game] Server disconnected. Stopping game.")
 		self.stop()
 
 class HostGameScene(GameLogicMixin, simpleGENetworking.HostScene):

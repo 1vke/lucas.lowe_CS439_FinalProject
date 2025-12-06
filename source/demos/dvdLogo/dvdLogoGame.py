@@ -130,7 +130,6 @@ class DvdHostScene(DraggableWindowMixin, simpleGENetworking.HostScene):
 		
 		self.sprites = [self.logo]
 		self.net_sprite_group = self.makeSpriteGroup([self.logo])
-		self.addGroup(self.net_sprite_group)
 
 	def _set_window_size(self, size, position):
 		"""
@@ -138,22 +137,6 @@ class DvdHostScene(DraggableWindowMixin, simpleGENetworking.HostScene):
 		"""
 		self.screen = pygame.display.set_mode(size, pygame.NOFRAME)
 		self.background = pygame.Surface(self.screen.get_size())
-		self.background.fill((50, 0, 100))
-		# Draw a white, transparent grid
-		grid_color = (255, 255, 255, 50)  # White with 20% opacity (50/255)
-		grid_spacing = 50  # Pixels between grid lines
-		
-		# Create a transparent surface for the grid
-		grid_surface = pygame.Surface(size, pygame.SRCALPHA)
-		
-		# Draw vertical lines
-		for x in range(0, size[0], grid_spacing):
-			pygame.draw.line(grid_surface, grid_color, (x, 0), (x, size[1]))
-		# Draw horizontal lines
-		for y in range(0, size[1], grid_spacing):
-			pygame.draw.line(grid_surface, grid_color, (0, y), (size[0], y))
-		
-		self.background.blit(grid_surface, (0, 0))
 		self.window = sdl2.Window.from_display_module()
 		self.window.position = position
 
@@ -253,7 +236,6 @@ class DvdClientScene(DraggableWindowMixin, simpleGENetworking.ClientScene):
 		"""Sets up the borderless Pygame window and explicitly positions it on screen."""
 		self.screen = pygame.display.set_mode(size, pygame.NOFRAME)
 		self.background = pygame.Surface(self.screen.get_size())
-		self.background.fill((50, 0, 100))
 		self.window = sdl2.Window.from_display_module()
 		self.window.position = position
 

@@ -9,7 +9,6 @@ if project_root not in sys.path:
 from source import simpleGENetworking
 from source.simpleGE import simpleGE
 
-# --- Constants ---
 GAME_ID = "Square Shooter"
 WINDOW_SIZE = (1600, 900)
 PLAYER_SIZE = 30
@@ -64,7 +63,7 @@ class Player(simpleGENetworking.NetSprite):
         self.x = random.randint(50, WINDOW_SIZE[0]-50)
         self.y = random.randint(50, WINDOW_SIZE[1]-50)
         
-        self.cooldown = 0.001
+        self.cooldown = 0.2
         self.last_shot = 0
 
     def process(self):
@@ -182,7 +181,6 @@ class ShooterLogicMixin:
         self.local_player = None
         self.client_names = {} # {client_id: name}
         self.leaderboard = {} # {name: kills}
-        self.destroyed_queue = [] # [sprite_id] to tell others to kill
         
         # UI
         self.lbl_leaderboard = TransparentMultiLabel()
@@ -260,9 +258,6 @@ class ShooterLogicMixin:
             if self.kill_queue:
                 payload["kill_events"] = self.kill_queue[:]
                 self.kill_queue.clear()
-            if self.destroyed_queue:
-                payload["destroyed_sprites"] = self.destroyed_queue[:]
-                self.destroyed_queue.clear()
             payload["client_names"] = self.client_names
             
         return payload
@@ -359,7 +354,8 @@ class ShooterHost(ShooterLogicMixin, simpleGENetworking.HostScene):
     def __init__(self, name, host='0.0.0.0'):
         # Default ports
         super().__init__(host=host, game_id=GAME_ID, window_size=WINDOW_SIZE)
-        self.sprites = []
+        # Clear the default sample sprite created by simpleGE.Scene
+        self.sprites = [] 
         self.init_game_logic(name)
         self.client_names = {} # {client_id: name}
         self.kill_queue = []
@@ -435,7 +431,8 @@ class ShooterHost(ShooterLogicMixin, simpleGENetworking.HostScene):
 class ShooterClient(ShooterLogicMixin, simpleGENetworking.ClientScene):
     def __init__(self, name, host):
         super().__init__(host=host, game_id=GAME_ID, window_size=WINDOW_SIZE)
-        self.sprites = []
+        # Clear the default sample sprite created by simpleGE.Scene
+        self.sprites = [] 
         self.init_game_logic(name)
 
     def process(self):
