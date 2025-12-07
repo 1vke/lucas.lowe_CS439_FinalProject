@@ -21,9 +21,9 @@ To get started with this project:
     ```
 
 2.  **Install Dependencies**:
-    This project requires `pygame`. You can install it using the provided requirements file:
+    This project requires `pygame`. You can install it by running this command:
     ```bash
-    pip install -r requirements.txt
+    pip install pygame
     ```
 
 3.  **Run a Demo**:
